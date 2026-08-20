@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Das Deploy-System legt bei jedem Schreiben Sicherungen an.
+*.bak
+*.orig
+
+# Protokolle und eigene Einstellungen
+*.log
+ki_packager_build.log
+ki_packager_accepted.flag
+
+# Die Marke gehoert dem, der den Packager benutzt. Eine Vorlage liegt
+# als marke.beispiel.json bei - die eigene Fassung bleibt draussen.
+ki_packager_marke.json
+
+# Logos sind geschuetzt. Sie gehoeren dem Urheber, nicht der MIT-Lizenz.
+# Wer den Packager benutzt, legt hier seine eigenen ab.
+logo_*.png
+*.ico
+
+# Nur fuer Claude bestimmt
+Projektverzeichnis.txt
+PAKETBAU_AUFBAU.txt
+PAKETBAU_SESSIONS.txt
+PAKETBAU_HEUTE.txt
+
+# Patchskripte der Entwicklung
+werkzeug/
+
+# Der vollstaendige GPL-Text wird bei Bedarf geladen.
+gpl-3.0.txt
+
+# Windows
+Thumbs.db
+desktop.ini
