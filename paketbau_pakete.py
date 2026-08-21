@@ -96,6 +96,13 @@ def _pflicht_abhaengigkeiten(verteilung):
     for zeile in angaben:
         if "extra ==" in zeile:
             continue
+        # Bedingungen auswerten statt ueberlesen. pynput nennt evdev fuer
+        # Linux, webview nennt pyobjc fuer macOS - beides gilt hier nie.
+        if ";" in zeile:
+            bedingung = zeile.split(";", 1)[1].lower()
+            if "sys_platform" in bedingung or "platform_system" in bedingung:
+                if not ("win32" in bedingung or "windows" in bedingung):
+                    continue
         name = zeile.split(";")[0].strip()
         for trenner in ("<", ">", "=", "!", "~", "[", " ", "("):
             name = name.split(trenner)[0]
@@ -156,6 +163,73 @@ def mit_abhaengigkeiten(module, log=None):
     return fertig
 
 
+def _wo_liegt(modul):
+    """
+    Wo liegt ein Modul auf dieser Platte?
+
+    Python weiss es selbst. find_spec kennt jeden Ordner im Suchpfad,
+    auch die aus pth-Dateien - kis_toene liegt ausserhalb aller
+    site-packages und wird nur so gefunden.
+
+    Zurueck kommt eine Liste von Pfaden: der Ordner oder die Datei des
+    Moduls, dazu die zugehoerigen Angaben der Paketverwaltung, falls das
+    Programm sie zur Laufzeit abfragt.
+    """
+    import importlib.util
+
+    orte = []
+    try:
+        spec = importlib.util.find_spec(modul)
+    except Exception:
+        spec = None
+
+    if spec is not None:
+        if spec.submodule_search_locations:
+            for ort in list(spec.submodule_search_locations):
+                if os.path.isdir(ort):
+                    orte.append(ort)
+                    break
+        elif spec.origin and os.path.isfile(spec.origin):
+            orte.append(spec.origin)
+
+    # Nachbarn und Angaben daneben.
+    #
+    # numpy legt seine uebersetzten Bibliotheken nicht in den eigenen
+    # Ordner, sondern in numpy.libs daneben. Ohne ihn bricht numpy beim
+    # ersten Aufruf ab mit DLL load failed. soundfile und sounddevice
+    # halten es ebenso mit _soundfile_data und _sounddevice_data.
+    #
+    # Die dist-info kommt mit, damit importlib.metadata beim Empfaenger
+    # dieselben Auskuenfte geben kann wie hier.
+    if orte:
+        elternteil = os.path.dirname(orte[0])
+        klein = modul.lower().replace("-", "_")
+        nachbarn = (klein + ".libs", klein + ".dlls",
+                    "_" + klein + "_data", klein + "_libs")
+        try:
+            for eintrag in os.listdir(elternteil):
+                e = eintrag.lower().replace("-", "_")
+                voll = os.path.join(elternteil, eintrag)
+                if voll in orte:
+                    continue
+                if e in nachbarn:
+                    orte.append(voll)
+                elif e.startswith(klein + "-") and e.endswith(
+                        (".dist-info", ".egg-info")):
+                    orte.append(voll)
+        except Exception:
+            pass
+        return orte
+
+    # Rueckfall: die alte Suche ueber site-packages, fuer Namen die sich
+    # nicht einbinden lassen.
+    sp = _site_packages()
+    if sp:
+        for eintrag in _verteilungsordner(sp, modul):
+            orte.append(os.path.join(sp, eintrag))
+    return orte
+
+
 def sammle(app_dir, pakete, log=None):
     """
     Kopiert die genannten Pakete nach app_dir\\pakete und schreibt daneben
@@ -178,24 +252,16 @@ def sammle(app_dir, pakete, log=None):
         _schreibe_anforderung(app_dir, angaben)
         return angaben
 
-    sp = _site_packages()
-    if not sp:
-        _log(log, "FEHLER: site-packages nicht gefunden.")
-        angaben["fehlend"] = gebraucht
-        _schreibe_anforderung(app_dir, angaben)
-        return angaben
-
     os.makedirs(ziel, exist_ok=True)
     for paket in gebraucht:
-        eintraege = _verteilungsordner(sp, paket)
-        if not eintraege:
+        orte = _wo_liegt(paket)
+        if not orte:
             _log(log, "NICHT GEFUNDEN: " + paket
                  + " - das Programm koennte beim Empfaenger scheitern.")
             angaben["fehlend"].append(paket)
             continue
-        for e in eintraege:
-            quelle = os.path.join(sp, e)
-            zielp = os.path.join(ziel, e)
+        for quelle in orte:
+            zielp = os.path.join(ziel, os.path.basename(quelle))
             try:
                 if os.path.isdir(quelle):
                     shutil.copytree(
@@ -205,7 +271,8 @@ def sammle(app_dir, pakete, log=None):
                 else:
                     shutil.copy2(quelle, zielp)
             except Exception as fehler:
-                _log(log, "Fehler bei " + e + ": " + str(fehler))
+                _log(log, "Fehler bei " + os.path.basename(quelle)
+                     + ": " + str(fehler))
         angaben["pakete"].append(paket)
         _log(log, "Mitgenommen: " + paket)
 

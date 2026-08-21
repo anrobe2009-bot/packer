@@ -35,6 +35,7 @@ from tkinter import filedialog, messagebox
 import paketbau_python as pyb
 import paketbau_pakete as pk
 import paketbau_einfuehrung as pe
+import paketbau_hochladen as ph
 
 
 def _sucht_eingaben(src_dir):
@@ -629,11 +630,80 @@ GEHEIM_TEILE = ("_config.json", "-config.json", "_settings.json",
 # ausgelassen - dort steht das Wort "password" voellig zu Recht.
 DATEN_ENDUNGEN = {".json", ".txt", ".ini", ".cfg", ".conf", ".yaml", ".yml",
                   ".xml", ".csv", ".env", ".properties", ".toml"}
+# Ein Name, hinter dem ein Wert stehen koennte. Ob der Wert wirklich
+# ein Schluessel ist, entscheidet _echter_schluessel - der Name allein
+# sagt gar nichts.
 GEHEIM_WORTE = re.compile(
     r'["\']?(password|passwort|passwd|api[_-]?key|apikey|secret|'
     r'client_secret|access_token|refresh_token|private_key|app_password|'
-    r'zugangsdaten|schluessel)["\']?\s*[:=]\s*["\']?[^\s"\',}]{4,}',
+    r'zugangsdaten|schluessel|token)["\']?\s*[:=]\s*'
+    r'["\']?([^\s"\',}\]]{4,})',
     re.I)
+
+# Formen, die es nur bei echten Schluesseln gibt.
+SCHLUESSEL_ANFANG = ("sk-", "sk_live_", "sk_test_", "pk_live_", "rk_live_",
+                     "aiza", "ya29.", "ghp_", "gho_", "ghu_", "ghs_",
+                     "github_pat_", "xoxb-", "xoxp-", "xoxa-", "xoxs-",
+                     "gsk_", "akia", "asia", "glpat-", "dop_v1_",
+                     "shpat_", "shpss_", "sq0atp-", "eyj")
+
+# Woerter, die einen Platzhalter verraten. Wer sie schreibt, meint
+# ausdruecklich keinen echten Schluessel.
+PLATZHALTER = ("dein", "deine", "ihr", "ihre", "your", "hier", "here",
+               "xxx", "yyy", "zzz", "abc123", "changeme", "change_me",
+               "beispiel", "example", "sample", "todo", "none", "null",
+               "leer", "empty", "platzhalter", "placeholder", "test",
+               "insert", "einfuegen", "unset", "notset", "fixme")
+
+
+def _echter_schluessel(wert):
+    """
+    Ist das wirklich ein Zugangsschluessel - oder nur sein Name?
+
+    Der Unterschied entscheidet, ob eine Warnung berechtigt ist. Am
+    21.08.2026 meldete der Packager OPENAI_API_KEY als Zugangsdaten,
+    obwohl das nur der Name einer Umgebungsvariablen ist.
+    """
+    w = str(wert).strip().strip('"\'`,;')
+    if not w:
+        return False
+
+    klein = w.lower()
+
+    # Bekannte Formen. Da braucht es keine weitere Ueberlegung.
+    for anfang in SCHLUESSEL_ANFANG:
+        if klein.startswith(anfang) and len(w) >= 12:
+            return True
+
+    # Ein Verweis auf etwas anderes, kein Wert.
+    if w[0] in "$%<{(" or w.startswith("&"):
+        return False
+    if "\\" in w or "/" in w:
+        return False
+
+    # Der Name einer Umgebungsvariablen: nur Grossbuchstaben, Ziffern
+    # und Unterstriche. So sieht kein Schluessel aus.
+    if re.fullmatch(r"[A-Z0-9_]+", w):
+        return False
+
+    # Ausdruecklich als Platzhalter gemeint.
+    for wort in PLATZHALTER:
+        if wort in klein:
+            return False
+
+    # Zu kurz, um ein Schluessel zu sein.
+    if len(w) < 20:
+        return False
+
+    # Bleibt: eine lange Zeichenfolge. Ein echter Schluessel mischt
+    # Buchstaben und Ziffern und wiederholt sich nicht.
+    hat_ziffer = any(z.isdigit() for z in w)
+    hat_buchstabe = any(z.isalpha() for z in w)
+    vielfalt = len(set(w)) / len(w)
+    if hat_ziffer and hat_buchstabe and vielfalt > 0.35:
+        return True
+
+    return False
 
 
 DEINSTALL_PS1 = r"""
@@ -734,16 +804,31 @@ Start-Sleep -Milliseconds 900
 # Loeschen und nachsehen. Dreimal versuchen - Windows gibt manche Datei
 # erst nach einem Augenblick frei.
 function Weg($Pfad) {
+    # Sechs Versuche mit wachsenden Pausen. Windows gibt manche Datei
+    # erst frei, wenn der aufrufende Vorgang beendet ist - bei der
+    # Deinstallation ist das die cmd.exe der DEINSTALLIEREN.bat.
     if (-not $Pfad) { return $true }
     if (-not (Test-Path -LiteralPath $Pfad)) { return $true }
-    for ($i = 0; $i -lt 3; $i++) {
+    for ($i = 1; $i -le 6; $i++) {
         try {
             Remove-Item -LiteralPath $Pfad -Recurse -Force -ErrorAction Stop
         } catch {}
         if (-not (Test-Path -LiteralPath $Pfad)) { return $true }
-        Start-Sleep -Milliseconds 700
+        Start-Sleep -Milliseconds (300 * $i)
     }
     return $false
+}
+
+function IstLeer($Pfad) {
+    # Ein Ordner ohne Inhalt. Darin liegt nichts, was jemanden angeht.
+    if (-not (Test-Path -LiteralPath $Pfad)) { return $false }
+    try {
+        $inhalt = @(Get-ChildItem -LiteralPath $Pfad -Force -Recurse `
+                    -ErrorAction SilentlyContinue)
+        return ($inhalt.Count -eq 0)
+    } catch {
+        return $false
+    }
 }
 
 Set-Location $env:TEMP
@@ -814,8 +899,32 @@ if (-not (Weg $Ziel)) { $Rest += $Ziel }
 $Rest = @($Rest | Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
           Select-Object -Unique)
 
+# Ein leerer Ordner ist kein Rest. Darin liegt nichts - er haengt nur
+# noch an der cmd.exe, die diese Deinstallation gestartet hat, und
+# verschwindet, sobald die beendet ist. Ein Nachzuegler im Hintergrund
+# holt ihn.
+$Huelle = @($Rest | Where-Object { IstLeer $_ })
+if ($Huelle.Count -gt 0) {
+    $Rest = @($Rest | Where-Object { -not (IstLeer $_) })
+    foreach ($h in $Huelle) {
+        try {
+            $nach = "for (`$i = 0; `$i -lt 30; `$i++) { " +
+                    "Start-Sleep -Seconds 2; " +
+                    "Remove-Item -LiteralPath '" + $h + "' -Recurse -Force " +
+                    "-ErrorAction SilentlyContinue; " +
+                    "if (-not (Test-Path -LiteralPath '" + $h + "')) { break } }"
+            Start-Process powershell -WindowStyle Hidden `
+                -ArgumentList @("-NoProfile", "-Command", $nach)
+        } catch {}
+    }
+}
+
 if ($Rest.Count -eq 0) {
-    Sag "$Name wurde vollstaendig entfernt.`r`n`r`nEs bleibt nichts zurueck: kein Programmordner, keine Verknuepfung, keine Einstellungen." "Fertig" $false
+    $text = "$Name wurde vollstaendig entfernt.`r`n`r`nEs bleibt nichts zurueck: kein Programm, keine Verknuepfung, keine Einstellungen, keine Zugangsschluessel."
+    if ($Huelle.Count -gt 0) {
+        $text += "`r`n`r`nDer leere Programmordner verschwindet in den naechsten Sekunden von selbst. Es liegt nichts mehr darin."
+    }
+    Sag $text "Fertig" $false
 } else {
     $t = "$Name wurde NICHT vollstaendig entfernt.`r`n`r`nStehen geblieben ist:`r`n"
     foreach ($r in $Rest) { $t += "  " + $r + "`r`n" }
@@ -866,12 +975,18 @@ def _geheimnis_verdacht(dateien):
             txt = open(p, "r", encoding="utf-8", errors="replace").read()
         except Exception:
             continue
-        m = GEHEIM_WORTE.search(txt)
-        if m:
-            fund = m.group(0)
-            if len(fund) > 48:
-                fund = fund[:48] + " ..."
-            treffer.append((os.path.basename(p), fund.strip()))
+        for nr, zeile in enumerate(txt.splitlines(), 1):
+            m = GEHEIM_WORTE.search(zeile)
+            if not m:
+                continue
+            if not _echter_schluessel(m.group(2)):
+                continue
+            wert = m.group(2)
+            gekuerzt = wert[:6] + "..." if len(wert) > 10 else wert
+            treffer.append((os.path.basename(p),
+                            m.group(1) + " Zeile " + str(nr)
+                            + ": " + gekuerzt))
+            break
     return treffer
 
 # Qt-Zusatzmodule, die PyInstaller sonst blind mitschleppt.
@@ -1065,8 +1180,59 @@ def _paket_zusatz(src_dir):
 
 # Begleitdateien der Projektverwaltung. Sie beschreiben Roberts
 # Arbeitsweise und gehen niemanden an, der ein Werkzeug geschenkt bekommt.
-BEGLEIT_ENDEN = ("_aufbau.txt", "_sessions.txt", "_heute.txt")
-BEGLEIT_NAMEN = {"projektverzeichnis.txt", "projektverzeichnis"}
+BEGLEIT_ENDEN = ("_aufbau.txt", "_sessions.txt", "_heute.txt",
+                 "_entwicklung.txt", "_technik.md", "_spec.md")
+
+# Unterlagen der Entwicklung. Sie sind fuer Robert und die KI bestimmt,
+# nicht fuer den Beschenkten - der braucht LIESMICH.md und BEDIENUNG.md.
+# Wer am Kode arbeiten will, findet alles auf GitHub.
+#
+# Frueher wurden nur Namen mit Unterstrich erkannt, also
+# SCHREIBER_AUFBAU.txt. Hiess die Datei schlicht AUFBAU.txt, ging sie
+# durch - am 20.08.2026 lag deshalb ENTWICKLUNG.txt im Paket, mit dem
+# Pfad zu Roberts .env darin.
+BEGLEIT_NAMEN = {
+    "projektverzeichnis.txt", "projektverzeichnis",
+    "aufbau.txt", "sessions.txt", "heute.txt", "entwicklung.txt",
+    "technik.md", "spec.md", "todo.md", "todo.txt",
+    "changelog.md", "notizen.txt", "notizen.md",
+}
+
+# Textarten, in die hineingesehen wird. Quelltext bleibt aussen vor:
+# dort steht ein Pfad manchmal zu Recht.
+PRUEF_ARTEN = (".txt", ".md", ".json", ".ini", ".cfg", ".yaml", ".yml",
+               ".html", ".csv", ".log")
+
+# Was im Inhalt nichts zu suchen hat. Der Name einer Datei sagt nichts
+# ueber ihren Inhalt - eine Namensliste kennt nur, woran jemand dachte.
+INHALT_MUSTER = (
+    ("Pfad zum Benutzerkonto", r"[A-Za-z]:[\\/]Users[\\/][^\s\"'<>|)\]]+"),
+    ("Zugangsschluessel", r"\b(?:sk-[A-Za-z0-9]{16,}|AIza[A-Za-z0-9_\-]{20,}"
+                          r"|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})"),
+)
+
+
+def _inhalt_pruefen(dateien, log=None):
+    """
+    Sieht in die Dateien hinein. Gibt eine Liste der Fundstellen zurueck -
+    leer heisst sauber.
+    """
+    import re
+    funde = []
+    for pfad in dateien:
+        if not pfad.lower().endswith(PRUEF_ARTEN):
+            continue
+        try:
+            with open(pfad, "r", encoding="utf-8", errors="replace") as fh:
+                zeilen = fh.read().splitlines()
+        except Exception:
+            continue
+        for nr, zeile in enumerate(zeilen, 1):
+            for was, muster in INHALT_MUSTER:
+                if re.search(muster, zeile):
+                    funde.append((pfad, nr, was))
+                    break
+    return funde
 
 
 # Was der Packager selbst ins Paket legt. Diese Dateien duerfen die
@@ -1118,6 +1284,26 @@ def _skip_grund(dateiname):
         return "Systemdatei"
     if n in BEGLEIT_NAMEN or n.endswith(BEGLEIT_ENDEN):
         return "Begleitdatei, nur fuer Claude"
+
+    # Eigene Einstellungen, nach der Form beurteilt statt nach einer
+    # Liste von Namen. In einer Markendatei stehen Ablageorte, Pfade
+    # und Namen - beim Empfaenger sind sie falsch und gehen ihn nichts
+    # an. Am 21.08.2026 waere ki_packager_marke.json mitgewandert,
+    # weil der Filter nur settings.json und config.json kannte.
+    stamm = os.path.splitext(n)[0]
+    if endung in (".json", ".ini", ".cfg", ".conf", ".toml", ".yaml",
+                  ".yml"):
+        for teil in ("marke", "einstellung", "settings", "setting",
+                     "config", "konfig", "prefs", "preference",
+                     "optionen", "options", "profil", "profile"):
+            if teil in stamm:
+                return "eigene Einstellungen"
+
+    # Patchskripte gehoeren zur Entwicklung. Der Ordner werkzeug ist
+    # ausgeschlossen, aber sie liegen nicht immer dort.
+    if stamm.startswith("patch_") or stamm.startswith("fix_"):
+        return "Patchskript der Entwicklung"
+
     return ""
 
 
@@ -1393,6 +1579,25 @@ function Installiere($Ziel, $Desktop, $Startmenue) {
     }
     # Ab hier wird Buch gefuehrt. Jeder Schritt traegt sich sofort ein -
     # bricht die Installation ab, steht trotzdem da, was schon entstand.
+    # Laeuft das Programm noch? Dann erst beenden - sonst verweigert
+    # Windows das Ueberschreiben und die Installation bleibt halb
+    # stecken, ohne dass jemand es merkt.
+    $script:Nachher = @()
+    foreach ($p in (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+        if ($p.ProcessId -eq $PID) { continue }
+        if (-not $p.CommandLine) { continue }
+        if ($p.CommandLine -like "*$Ziel*") {
+            $script:Nachher += $p.CommandLine
+            try {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+            } catch {}
+        }
+    }
+    if ($script:Nachher.Count -gt 0) {
+        $hinweise += "Die laufende Fassung wurde beendet und nach der Installation neu gestartet."
+        Start-Sleep -Milliseconds 1200
+    }
+
     $script:Liste = Join-Path $Ziel "installiert.txt"
     try {
         Set-Content -LiteralPath $script:Liste -Encoding UTF8 -Value @(
@@ -1401,7 +1606,15 @@ function Installiere($Ziel, $Desktop, $Startmenue) {
     } catch { $script:Liste = $null }
     Notiere $Ziel "Ordner"
 
-    Copy-Item -Path (Join-Path $Quelle "*") -Destination $Ziel -Recurse -Force
+    # Fehler beim Kopieren nicht verschlucken. Eine Installation, die
+    # scheitert und Erfolg meldet, ist schlimmer als eine, die
+    # abbricht.
+    try {
+        Copy-Item -Path (Join-Path $Quelle "*") -Destination $Ziel `
+                  -Recurse -Force -ErrorAction Stop
+    } catch {
+        $hinweise += "Nicht alles liess sich kopieren: " + $_.Exception.Message
+    }
     Copy-Item (Join-Path $PSScriptRoot "_deinstall.ps1") $Ziel -Force
     Copy-Item (Join-Path $PSScriptRoot "DEINSTALLIEREN.bat") $Ziel -Force
     if ($Desktop) {
@@ -1443,6 +1656,16 @@ function Installiere($Ziel, $Desktop, $Startmenue) {
         Notiere $Schluessel "Registry"
     } catch {
         $hinweise += "Der Eintrag in Apps und Features liess sich nicht anlegen."
+    }
+
+    # Was vorher lief, wieder starten. Wer ein Programm erneuert,
+    # erwartet es danach an derselben Stelle wieder vor sich.
+    foreach ($befehl in $script:Nachher) {
+        try {
+            Start-Process -FilePath "cmd.exe" `
+                          -ArgumentList "/c", "start", "", $befehl `
+                          -WindowStyle Hidden
+        } catch {}
     }
 
     return @{ Ziel = $Ziel; Hinweise = $hinweise }
@@ -1623,7 +1846,7 @@ class KIPackager:
         self.root = tk.Tk()
         self.root.title(f"KI Packager {PACKAGER_VERSION}")
         self.root.configure(bg="#1a2332")
-        self.root.minsize(760, 780)
+        self.root.minsize(840, 620)
         try:
             logos = _find_logos()
             icon_path = _default_icon_path(logos)
@@ -1634,6 +1857,8 @@ class KIPackager:
             pass
         self._spinning = False
         self._build_ui()
+        self.root.bind("<F2>", self._zeige_einstellungen)
+        self.root.bind("<F5>", lambda _e: self._build())
         self.root.mainloop()
 
     # ---------------------------------------------------------------- Aufbau
@@ -1653,8 +1878,13 @@ class KIPackager:
             pass
         tk.Label(hdr, text="KI Packager", bg="#0d1b2a", fg="#00e5c8",
                  font=("Segoe UI", 18, "bold")).pack(side="left")
-        tk.Label(hdr, text="KI Stammtisch Cologne", bg="#0d1b2a", fg="#8fa8c8",
-                 font=("Segoe UI", 10)).pack(side="right", padx=16)
+        tk.Button(hdr, text="Einstellungen (F2)",
+                  command=self._zeige_einstellungen,
+                  bg="#2e4060", fg="#e8edf5", relief="flat",
+                  font=("Segoe UI", 10), cursor="hand2").pack(
+                      side="right", padx=16)
+        tk.Label(hdr, text=FIRMA, bg="#0d1b2a", fg="#8fa8c8",
+                 font=("Segoe UI", 10)).pack(side="right", padx=8)
 
         body = tk.Frame(r, bg="#1a2332", padx=24, pady=14)
         body.pack(fill="both", expand=True)
@@ -1669,6 +1899,8 @@ class KIPackager:
         self.do_bat = tk.BooleanVar(value=True)
         self.do_doku = tk.BooleanVar(value=True)
         self.do_zip = tk.BooleanVar(value=True)
+        self.do_selbst = tk.BooleanVar(value=False)
+        self.do_webseite = tk.BooleanVar(value=False)
         self.do_logo = tk.BooleanVar(value=True)
         self.selected_logo = tk.StringVar(value="")
 
@@ -1684,21 +1916,41 @@ class KIPackager:
                                             padx=(8, 0), pady=6)
 
         self.preview_var = tk.StringVar(value="ZIP-Name: " + ZIP_PREFIX + "...")
-        tk.Label(body, textvariable=self.preview_var, bg="#1a2332", fg="#4a6a8a",
-                 font=("Segoe UI", 8)).grid(row=4, column=0, columnspan=2,
-                                             sticky="w", pady=(0, 6))
+        tk.Label(body, textvariable=self.preview_var, bg="#1a2332",
+                 fg="#4a6a8a", font=("Segoe UI", 8)).grid(
+                     row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self.name_var.trace_add("write", self._update_preview)
 
-        self._build_marke_row(body, row=5)
-        self._build_logo_picker(body, row=6)
-        self._build_progress_bar(body, row=7)
+        # Alles Dauerhafte in ein eigenes Fenster. Es wird jetzt angelegt
+        # und nur versteckt - so sind alle Angaben von Anfang an da,
+        # auch wenn es nie geoeffnet wird.
+        self._baue_einstellungen()
+
+        self._build_progress_bar(body, row=5)
 
         cbf = tk.Frame(body, bg="#1a2332")
-        cbf.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(10, 8))
+        cbf.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 8))
+
+        # Der Bauen-Knopf gehoert hierher, nicht auf die
+        # Einstellungsseite. Er stand frueher in der Logo-Reihe und
+        # wanderte mit ihr mit.
+        tk.Button(cbf, text="  Paket bauen  ",
+                  bg="#00e5c8", fg="#0d1b2a",
+                  activebackground="#00bfa5", activeforeground="#0d1b2a",
+                  font=("Segoe UI", 13, "bold"), bd=0, padx=20, pady=12,
+                  cursor="hand2", relief="flat",
+                  command=self._build).pack(side="right", padx=(20, 8))
         opts = [(self.do_python,
                  "Python mitliefern (~30 MB, laeuft ohne Installation)"),
                 (self.do_bat, "BAT/LNK"), (self.do_doku, "Doku"),
-                (self.do_zip, "ZIP")]
+                (self.do_zip, "ZIP"),
+                (self.do_selbst, "Bei mir installieren")]
+
+        # Den Haken fuer die Webseite gibt es nur, wenn ein Ordner
+        # dafuer eingetragen ist. Wer den Packer uebernimmt, hat keine -
+        # dann soll ihn auch nichts danach fragen.
+        if str(lade_marke().get("webseite", "")).strip():
+            opts.append((self.do_webseite, "Fuer die Webseite"))
         for var, txt in opts:
             tk.Checkbutton(cbf, text=txt, variable=var,
                            bg="#1a2332", fg="#e8edf5", selectcolor="#0d3b66",
@@ -1707,10 +1959,10 @@ class KIPackager:
                                                                        padx=8)
 
         tk.Label(body, text="Log:", bg="#1a2332", fg="#8fa8c8",
-                 font=("Segoe UI", 9)).grid(row=9, column=0, columnspan=2, sticky="w")
+                 font=("Segoe UI", 9)).grid(row=7, column=0, columnspan=2, sticky="w")
         logwrap = tk.Frame(body, bg="#1a2332")
-        logwrap.grid(row=10, column=0, columnspan=2, sticky="nsew", pady=(2, 0))
-        body.rowconfigure(10, weight=1)
+        logwrap.grid(row=8, column=0, columnspan=2, sticky="nsew", pady=(2, 0))
+        body.rowconfigure(8, weight=1)
         logwrap.columnconfigure(0, weight=1)
         logwrap.rowconfigure(0, weight=1)
         self.log = tk.Text(logwrap, bg="#0d1b2a", fg="#8fa8c8",
@@ -1720,6 +1972,105 @@ class KIPackager:
         sb = tk.Scrollbar(logwrap, command=self.log.yview, bg="#1a2332")
         sb.grid(row=0, column=1, sticky="ns")
         self.log.config(yscrollcommand=sb.set)
+
+    def _baue_einstellungen(self):
+        """
+        Das Fenster fuer alles Dauerhafte.
+
+        Es wird beim Start angelegt und sofort versteckt. Grund: Die
+        Eingabefelder darin gehoeren zu Angaben, die der Bauablauf
+        braucht - gaebe es sie erst beim Oeffnen, scheiterte ein Bau,
+        solange das Fenster nie aufgerufen wurde.
+        """
+        w = tk.Toplevel(self.root)
+        w.title("Einstellungen - " + FIRMA)
+        w.configure(bg="#1a2332")
+        w.minsize(760, 520)
+        w.withdraw()
+        w.protocol("WM_DELETE_WINDOW", self._schliesse_einstellungen)
+        w.bind("<Escape>", lambda _e: self._schliesse_einstellungen())
+        self._einst_fenster = w
+
+        kopf = tk.Frame(w, bg="#0d1b2a", pady=8)
+        kopf.pack(fill="x")
+        tk.Label(kopf, text="Einstellungen", bg="#0d1b2a", fg="#00e5c8",
+                 font=("Segoe UI", 14, "bold")).pack(side="left", padx=16)
+        tk.Label(kopf, text="Gilt fuer alle Pakete", bg="#0d1b2a",
+                 fg="#8fa8c8", font=("Segoe UI", 9)).pack(side="right",
+                                                          padx=16)
+
+        innen = tk.Frame(w, bg="#1a2332", padx=20, pady=14)
+        innen.pack(fill="both", expand=True)
+        innen.columnconfigure(1, weight=1)
+
+        # Wohin gebaut wird. Stand frueher fest im Kode und war nirgends
+        # zu sehen - wer nicht auf den Bildschirm schauen kann, wusste
+        # hinterher nicht, wo das Ergebnis liegt.
+        tk.Label(innen, text="Ablage:", bg="#1a2332", fg="#e8edf5",
+                 font=("Segoe UI", 11)).grid(row=0, column=0, sticky="w",
+                                             pady=6)
+        gemerkt = str(lade_marke().get("ziel", "")).strip()
+        self.ziel_var = tk.StringVar(value=gemerkt or ZIEL_ORDNER)
+        tk.Entry(innen, textvariable=self.ziel_var, bg="#0d3b66",
+                 fg="#e8edf5", insertbackground="#e8edf5",
+                 font=("Segoe UI", 10), relief="flat", bd=4).grid(
+                     row=0, column=1, sticky="ew", padx=(8, 8), pady=6)
+        tk.Button(innen, text="Waehlen ...", command=self._pick_ziel,
+                  bg="#2e4060", fg="#e8edf5", relief="flat",
+                  font=("Segoe UI", 10), cursor="hand2").grid(
+                      row=0, column=2, sticky="e", pady=6)
+
+        # Der zweite Ablageort: wohin die Werkzeuge fuer die Webseite
+        # gehen. Bleibt er leer, gibt es keine Webseite - dann fehlt im
+        # Hauptfenster auch der Haken dafuer.
+        tk.Label(innen, text="Webseite:", bg="#1a2332", fg="#e8edf5",
+                 font=("Segoe UI", 11)).grid(row=1, column=0, sticky="w",
+                                             pady=6)
+        self.web_ablage_var = tk.StringVar(
+            value=str(lade_marke().get("webseite", "")).strip())
+        tk.Entry(innen, textvariable=self.web_ablage_var, bg="#0d3b66",
+                 fg="#e8edf5", insertbackground="#e8edf5",
+                 font=("Segoe UI", 10), relief="flat", bd=4).grid(
+                     row=1, column=1, sticky="ew", padx=(8, 8), pady=6)
+        tk.Button(innen, text="Waehlen ...", command=self._pick_webablage,
+                  bg="#2e4060", fg="#e8edf5", relief="flat",
+                  font=("Segoe UI", 10), cursor="hand2").grid(
+                      row=1, column=2, sticky="e", pady=6)
+        tk.Label(innen,
+                 text="Leer lassen, wenn keine Webseite bestueckt wird.",
+                 bg="#1a2332", fg="#4a6a8a",
+                 font=("Segoe UI", 8)).grid(row=2, column=1, sticky="w",
+                                            padx=(8, 0))
+
+        self._build_marke_row(innen, row=3)
+        self._build_logo_picker(innen, row=4)
+
+        fuss = tk.Frame(w, bg="#1a2332", pady=10)
+        fuss.pack(fill="x")
+        tk.Button(fuss, text="Uebernehmen und schliessen",
+                  command=self._schliesse_einstellungen,
+                  bg="#00bfa5", fg="#0d1b2a", relief="flat",
+                  font=("Segoe UI", 11, "bold"), cursor="hand2").pack(
+                      side="right", padx=20)
+
+    def _zeige_einstellungen(self, *_):
+        w = getattr(self, "_einst_fenster", None)
+        if not w:
+            return
+        w.deiconify()
+        w.lift()
+        w.focus_force()
+
+    def _schliesse_einstellungen(self, *_):
+        """Schliessen heisst uebernehmen - die Angaben werden gesichert."""
+        try:
+            self._marke()
+            self._log("Einstellungen uebernommen.")
+        except Exception as fehler:
+            self._log("Einstellungen nicht gesichert: " + str(fehler))
+        w = getattr(self, "_einst_fenster", None)
+        if w:
+            w.withdraw()
 
     def _build_mode_row(self, body, row):
         wrap = tk.Frame(body, bg="#1a2332")
@@ -1825,9 +2176,25 @@ class KIPackager:
                                                                       padx=6)
 
     def _marke(self):
-        m = {"autor": self.autor_var.get().strip(),
-             "web": self.web_var.get().strip(),
-             "lizenz": self.lizenz_var.get()}
+        """
+        Die Marke speichern, ohne den Rest zu verlieren.
+
+        Frueher wurde hier ein neues Woerterbuch mit drei Feldern
+        gebaut und ueber die Datei geschrieben. firma, kuerzel und
+        downloads verschwanden dabei jedesmal - der Fehler fiel erst
+        auf, als das Archiv falsch hiess.
+        """
+        m = lade_marke()
+        if not isinstance(m, dict):
+            m = {}
+        m["autor"] = self.autor_var.get().strip()
+        m["web"] = self.web_var.get().strip()
+        m["lizenz"] = self.lizenz_var.get()
+        ziel = self.ziel_var.get().strip()
+        if ziel:
+            m["ziel"] = ziel
+        if hasattr(self, "web_ablage_var"):
+            m["webseite"] = self.web_ablage_var.get().strip()
         sichere_marke(m)
         return m
 
@@ -1874,12 +2241,6 @@ class KIPackager:
                   font=("Segoe UI", 11), bd=0, padx=16, pady=12,
                   cursor="hand2", relief="flat",
                   command=self._pick_logo).pack(side="left", padx=(16, 0))
-        tk.Button(row2, text="  Paket bauen  ",
-                  bg="#00e5c8", fg="#0d1b2a",
-                  activebackground="#00bfa5", activeforeground="#0d1b2a",
-                  font=("Segoe UI", 13, "bold"), bd=0, padx=20, pady=14,
-                  cursor="hand2", relief="flat",
-                  command=self._build).pack(side="right", padx=(20, 0))
         self.logo_info = tk.Label(wrap, text="", bg="#1a2332", fg="#8fa8c8",
                                   font=("Segoe UI", 9), anchor="w")
         self.logo_info.pack(anchor="w", pady=(6, 0), fill="x")
@@ -1969,6 +2330,25 @@ class KIPackager:
                 self.script_var.set(p)
                 self.name_var.set(os.path.splitext(os.path.basename(p))[0])
 
+    def _pick_webablage(self):
+        """Ordner der Webseite waehlen."""
+        p = filedialog.askdirectory(
+            title="Wohin sollen die Werkzeuge fuer die Webseite?",
+            initialdir=self.web_ablage_var.get().strip() or "C:\\")
+        if p:
+            self.web_ablage_var.set(os.path.normpath(p))
+            self._log("Ordner der Webseite: " + os.path.normpath(p))
+            self._log("Der Haken dafuer erscheint nach einem Neustart.")
+
+    def _pick_ziel(self):
+        """Ordner waehlen, in den gebaut wird."""
+        p = filedialog.askdirectory(title="Wohin soll gebaut werden?",
+                                    initialdir=self.ziel_var.get().strip()
+                                    or ZIEL_ORDNER)
+        if p:
+            self.ziel_var.set(os.path.normpath(p))
+            self._log("Ablage: " + os.path.normpath(p))
+
     def _update_preview(self, *_):
         raw = self.name_var.get().strip() or "..."
         self.preview_var.set("ZIP-Name: " + ZIP_PREFIX + raw + ".zip")
@@ -2051,6 +2431,10 @@ class KIPackager:
         if name != roh:
             self.name_var.set(name)
             self._log("Tool-Name bereinigt: " + roh + "  ->  " + name)
+
+        # Im Hauptfaden lesen, nicht spaeter im Baufaden - Tkinter mag
+        # das nicht.
+        self._ziel_basis = self.ziel_var.get().strip() or ZIEL_ORDNER
         if mode == "projekt":
             folder = self.folder_var.get().strip()
             entry = self.entry_var.get().strip()
@@ -2213,6 +2597,86 @@ class KIPackager:
                 self._log("Konnte nicht kopieren: " + eintrag + " - " + str(e))
         self._log("Quellkode als Klartext uebernommen.")
 
+        # Hineinsehen, nicht nur den Namen lesen. Eine Datei kann harmlos
+        # heissen und trotzdem einen Pfad zum Benutzerkonto enthalten.
+        alle = []
+        for wurzel, ordner, dateien in os.walk(app_dir):
+            ordner[:] = [d for d in ordner
+                         if d.lower() not in ("python", "pakete")]
+            alle.extend(os.path.join(wurzel, d) for d in dateien)
+        funde = _inhalt_pruefen(alle)
+        if funde:
+            self._log("ABBRUCH - private Angaben im Inhalt gefunden:")
+            for pfad, nr, was in funde[:20]:
+                self._log("   {}  Zeile {}  ({})".format(
+                    os.path.relpath(pfad, app_dir), nr, was))
+            if len(funde) > 20:
+                self._log("   ... und {} weitere".format(len(funde) - 20))
+            self._log("Diese Dateien aus dem Projekt entfernen oder die "
+                      "Angaben herausnehmen, dann neu bauen.")
+            return None, ("Inhaltspruefung: " + str(len(funde))
+                          + " Fundstelle(n) mit privaten Angaben. "
+                            "Siehe Log. Nichts wurde gepackt.")
+        self._log("Inhaltspruefung bestanden - keine privaten Pfade "
+                  "in den Dateien.")
+
+        # Echte Zugangsschluessel. Eine Datendatei kann der Packager
+        # weglassen - aus einer Programmdatei laesst sich nichts
+        # herausschneiden, ohne das Programm zu beschaedigen.
+        schlimm = []
+        entfernt = []
+        for wurzel, ordner, dateien in os.walk(app_dir):
+            ordner[:] = [d for d in ordner
+                         if d.lower() not in ("python", "pakete")]
+            for d in dateien:
+                voll = os.path.join(wurzel, d)
+                if os.path.splitext(d)[1].lower() not in DATEN_ENDUNGEN:
+                    continue
+                for _n, fund in _geheimnis_verdacht([voll]):
+                    if os.path.splitext(d)[1].lower() in DATEN_ENDUNGEN:
+                        try:
+                            os.remove(voll)
+                            entfernt.append(os.path.relpath(voll, app_dir))
+                            self._log("ENTFERNT: " + os.path.relpath(
+                                voll, app_dir) + " - enthaelt " + fund)
+                        except Exception as fehler:
+                            schlimm.append(os.path.relpath(voll, app_dir)
+                                           + " (" + str(fehler) + ")")
+                    else:
+                        schlimm.append(os.path.relpath(voll, app_dir)
+                                       + " - " + fund)
+        if schlimm:
+            self._log("ABBRUCH - Zugangsschluessel im Quelltext:")
+            for s in schlimm[:20]:
+                self._log("   " + s)
+            self._log("Diese Stellen im Projekt beheben, dann neu bauen.")
+            _ton("fehler")
+            try:
+                ph.sag("Abbruch. Im Quelltext steht ein "
+                       "Zugangsschluessel. Es wurde nichts gepackt.")
+            except Exception:
+                pass
+            return None, ("Zugangsschluessel gefunden: "
+                          + str(len(schlimm)) + " Stelle(n). Siehe Log.")
+
+        if entfernt:
+            # Hoerbar melden. Wer nicht mitliest, wuesste sonst nicht,
+            # dass eine Datei fehlt.
+            _ton("hinweis")
+            if len(entfernt) == 1:
+                ansage = ("Achtung. Eine Datei mit Zugangsdaten wurde aus "
+                          "dem Paket entfernt: " + entfernt[0]
+                          + ". Der Bau geht weiter.")
+            else:
+                ansage = ("Achtung. " + str(len(entfernt)) + " Dateien mit "
+                          "Zugangsdaten wurden aus dem Paket entfernt. "
+                          "Der Bau geht weiter.")
+            self._log(ansage)
+            try:
+                ph.sag(ansage)
+            except Exception:
+                pass
+
         # Endkontrolle. Sie fragt nicht, sie bricht ab. Eine Rueckfrage
         # kann man versehentlich mit Ja beantworten - und was einmal
         # verschenkt ist, holt niemand zurueck.
@@ -2354,7 +2818,16 @@ class KIPackager:
                 '  }\r\n'
                 '  exit 1\r\n'
                 '}\r\n')
-            zielsetzen = ('    $s.TargetPath = $Pyw\r\n'
+            # Das mitgelieferte Python zuerst. Es hat garantiert alles,
+            # weil der Packager es selbst bestueckt hat. Das Python des
+            # Zielrechners bleibt unberuehrt - es wird nur nicht mehr
+            # gebraucht.
+            zielsetzen = ('    $Eig = Join-Path $Ziel "python\\pythonw.exe"\r\n'
+                          '    if (Test-Path -LiteralPath $Eig) {\r\n'
+                          '        $s.TargetPath = $Eig\r\n'
+                          '    } else {\r\n'
+                          '        $s.TargetPath = $Pyw\r\n'
+                          '    }\r\n'
                           '    $s.Arguments = "`"$Ziel\\' + pycname + '`""')
 
         icon = ('    $s.IconLocation = "$Ziel\\app_icon.ico,0"'
@@ -2417,7 +2890,9 @@ class KIPackager:
             release = os.path.join(work_base, "release")
             src_dir = os.path.join(work_base, "src")
             os.makedirs(release, exist_ok=True)
-            os.makedirs(ZIEL_ORDNER, exist_ok=True)
+            ablage = getattr(self, "_ziel_basis", ZIEL_ORDNER)
+            os.makedirs(ablage, exist_ok=True)
+            self._log("Ablage: " + ablage)
             try:
                 if os.path.exists(BUILD_LOG):
                     os.remove(BUILD_LOG)
@@ -2472,7 +2947,7 @@ class KIPackager:
 
             size = self._dir_size(app_dir)
             if self.do_zip.get():
-                zip_path = os.path.join(ZIEL_ORDNER, ZIP_PREFIX + name + ".zip")
+                zip_path = os.path.join(ablage, ZIP_PREFIX + name + ".zip")
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED,
@@ -2513,6 +2988,42 @@ class KIPackager:
                         0, lambda: self._finish_build(False, fehler))
                     return
                 self._log("Endkontrolle im Archiv bestanden.")
+
+                # Fuer die Webseite bereitstellen. Der Server liest den
+                # Ablageordner selbst aus - was dort liegt, erscheint.
+                if self.do_webseite.get():
+                    try:
+                        _o, bericht = ph.bereitstellen(
+                            app_dir, name, zip_path, self._marke(),
+                            log=self._log)
+                        if _o:
+                            _ton("erfolg")
+                            ph.sag(bericht, log=self._log)
+                        else:
+                            _ton("fehler")
+                            ph.sag("Bereitstellen gescheitert. "
+                                   + bericht, log=self._log)
+                    except Exception as fehler:
+                        self._log("Bereitstellen gescheitert: "
+                                  + str(fehler))
+                        _ton("fehler")
+                        ph.sag("Bereitstellen gescheitert.",
+                               log=self._log)
+
+                # Bei Robert selbst einrichten. Oertlich, ohne Netz -
+                # das Paket liegt ja schon da.
+                if self.do_selbst.get():
+                    try:
+                        gut, bericht = ph.oertlich_installieren(
+                            zip_path, name, log=self._log)
+                        ph.sag(bericht, log=self._log)
+                        if not gut:
+                            _ton("fehler")
+                    except Exception as fehler:
+                        self._log("Installation gescheitert: "
+                                  + str(fehler))
+                        _ton("fehler")
+
                 zsize = os.path.getsize(zip_path)
                 self._log(f"ZIP erstellt: {zip_path}")
                 self._log(f"Groesse: {_human(size)} entpackt, "
@@ -2532,7 +3043,7 @@ class KIPackager:
             self._log("FERTIG.")
             self.root.after(0, lambda: self._finish_build(True, note))
             try:
-                subprocess.Popen(["explorer", ZIEL_ORDNER])
+                subprocess.Popen(["explorer", getattr(self, "_ziel_basis", ZIEL_ORDNER)])
             except Exception:
                 pass
         except Exception as e:
