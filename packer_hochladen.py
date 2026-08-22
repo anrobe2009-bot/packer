@@ -8,7 +8,7 @@ Beide unabhaengig. Ein Werkzeug kann nur bei Robert landen, nur auf der
 Webseite, oder beides.
 
 Der Umweg ueber das Hochladen im Browser entfaellt: Webserver und
-Paketbauer laufen auf demselben Rechner. Die Webseite liest den
+Packer laufen auf demselben Rechner. Die Webseite liest den
 Ablageordner bei jedem Aufruf selbst aus - was dort liegt, erscheint.
 Nichts wird von Hand gepflegt, nichts muss angemeldet werden.
 
@@ -24,7 +24,7 @@ import shutil
 import subprocess
 import zipfile
 
-from paketbau_python import _log
+from packer_python import _log
 
 # Der Ablageordner der Webseite steht in der Marke unter webseite.
 #
@@ -40,8 +40,8 @@ ABLAGE_WEBSEITE = ""
 def ablage_webseite():
     """Wohin die Werkzeuge fuer die Webseite gehen - oder leer."""
     try:
-        import paketbau
-        return str(paketbau.lade_marke().get("webseite", "")).strip()
+        import packer
+        return str(packer.lade_marke().get("webseite", "")).strip()
     except Exception:
         return ""
 
@@ -73,9 +73,9 @@ def netzname(name):
     # eingetragene Kuerzel, nicht irgendein Praefix - sonst
     # verstuemmelt es Namen, die zufaellig aehnlich beginnen.
     try:
-        import paketbau
+        import packer
         kuerzel = re.sub(r"[^a-z0-9_-]+", "-",
-                         str(paketbau.KUERZEL).lower()).strip("-_")
+                         str(packer.KUERZEL).lower()).strip("-_")
     except Exception:
         kuerzel = ""
     if kuerzel:

@@ -32,10 +32,10 @@ def _ton(art):
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-import paketbau_python as pyb
-import paketbau_pakete as pk
-import paketbau_einfuehrung as pe
-import paketbau_hochladen as ph
+import packer_python as pyb
+import packer_pakete as pk
+import packer_einfuehrung as pe
+import packer_hochladen as ph
 
 
 def _sucht_eingaben(src_dir):
@@ -574,11 +574,13 @@ PIP_NAMES = {
 # Ordner und Dateien, die nie mit ins Paket wandern
 SKIP_DIRS = {"__pycache__", ".git", ".idea", ".vscode", "build", "dist",
              "venv", ".venv", "env", "node_modules", "release", "build_tmp",
-             ".pytest_cache", ".mypy_cache", "backup", "backups", "sicherung"}
+             ".pytest_cache", ".mypy_cache", "backup", "backups", "sicherung",
+             "werkzeug"}
 SKIP_EXT = {".pyc", ".pyo", ".bak", ".orig", ".log", ".db", ".db-wal",
             ".db-shm", ".spec", ".zip", ".tmp", ".sqlite", ".sqlite3",
             ".session", ".crdownload", ".part"}
-SKIP_NAMES = {"thumbs.db", "desktop.ini"}
+SKIP_NAMES = {"thumbs.db", "desktop.ini", ".gitignore",
+              "packer_zoom.txt"}
 
 # Ordner, in die das Programm zur Laufzeit schreibt. Ihr Inhalt gehoert
 # dem Nutzer, nicht dem Paket - und beim Empfaenger entstehen sie von

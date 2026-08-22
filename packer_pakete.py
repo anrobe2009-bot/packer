@@ -18,7 +18,7 @@ import os
 import shutil
 import sys
 
-from paketbau_python import _KEIN_PAKET, _log, _site_packages, \
+from packer_python import _KEIN_PAKET, _log, _site_packages, \
     _verteilungsordner
 
 # Diese Endungen sind uebersetzt und passen nur zu einer Python-Version.

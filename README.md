@@ -1,4 +1,4 @@
-# paketbau
+# packer
 
 Python-Programme weitergeben, ohne dass Virenscanner Alarm schlagen und
 ohne dass der Empfänger etwas installieren muss.
@@ -15,7 +15,7 @@ Warnung und löscht die Datei. Er hat recht damit. Eine unsignierte
 Binärdatei ohne Ruf sieht für einen heuristischen Scanner aus wie
 Schadsoftware — und ein Zertifikat kostet mehrere hundert Euro im Jahr.
 
-paketbau geht deshalb einen anderen Weg.
+packer geht deshalb einen anderen Weg.
 
 ## Wer das gebaut hat, und warum
 
@@ -107,10 +107,10 @@ Systemverzeichnisse, kein zweites Python in fremden Installationen.
 
 | Datei | Aufgabe |
 |---|---|
-| `paketbau.py` | Oberfläche und Bauablauf |
-| `paketbau_python.py` | holt Python von python.org, rüstet tkinter nach |
-| `paketbau_pakete.py` | sammelt Fremdpakete samt Abhängigkeiten |
-| `paketbau_einfuehrung.py` | erzeugt die gesprochene Einführung |
+| `packer.py` | Oberfläche und Bauablauf |
+| `packer_python.py` | holt Python von python.org, rüstet tkinter nach |
+| `packer_pakete.py` | sammelt Fremdpakete samt Abhängigkeiten |
+| `packer_einfuehrung.py` | erzeugt die gesprochene Einführung |
 | `ki_packager_marke.json` | eigener Name, Kürzel, Urheber, Lizenz |
 
 ## Voraussetzungen

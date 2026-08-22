@@ -23,7 +23,7 @@ import json
 import os
 import re
 
-from paketbau_python import _log
+from packer_python import _log
 
 # Mehr hoert niemand geduldig an. Bei etwa hundertsechzig Zeichen je
 # Sekunde sind das gut vierzig Sekunden - lang genug fuer den Zweck,
