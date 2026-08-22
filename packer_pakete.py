@@ -235,7 +235,288 @@ def _wo_liegt(modul):
     return orte
 
 
-def sammle(app_dir, pakete, log=None):
+
+# --- Qt ausduennen ---------------------------------------------------
+# PySide6 bringt 634 MB mit, darunter einen vollstaendigen Browser
+# (Qt6WebEngineCore.dll, 195 MB). Ein Widgets-Programm nutzt davon
+# nichts. Was bleiben muss, wird nicht aufgeschrieben, sondern aus den
+# Dateikoepfen gelesen - siehe _pe_importe.
+
+QT_IMMER = ("QtCore", "QtGui")
+
+# Ordner, die zur Laufzeit nie geoeffnet werden.
+QT_ORDNER_RAUS = (
+    "include", "typesystems", "glue", "doc", "scripts",
+    "metatypes", "qml", "resources", "translations",
+)
+
+# Qt oeffnet diese Ordner erst zur Laufzeit; sie stehen in keiner
+# Importtabelle. Ohne platforms erscheint kein Fenster.
+QT_PLUGINS_BLEIBEN = (
+    "platforms", "styles", "imageformats", "iconengines",
+    "platforminputcontexts", "generic",
+)
+
+# Grafik-Rueckfall und Laufzeitbibliotheken. Sie haengen an keinem
+# Modul, fehlen aber auf fremden Rechnern schnell.
+QT_IMMER_DATEIEN = (
+    "opengl32sw.dll", "d3dcompiler_47.dll",
+    "libegl.dll", "libglesv2.dll",
+    "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+    "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll",
+)
+
+
+def _pe_importe(pfad):
+    """
+    Liest aus dem Dateikopf einer DLL, EXE oder PYD, welche anderen
+    Dateien sie braucht. Gibt die Namen klein zurueck, bei Unlesbarem
+    eine leere Menge - eine unlesbare Datei fuehrt nie zum Loeschen.
+    """
+    import struct
+    try:
+        with open(pfad, "rb") as f:
+            roh = f.read()
+    except Exception:
+        return set()
+    try:
+        if roh[:2] != b"MZ":
+            return set()
+        pe = struct.unpack_from("<I", roh, 0x3C)[0]
+        if roh[pe:pe + 4] != b"PE\0\0":
+            return set()
+        opt_groesse = struct.unpack_from("<H", roh, pe + 20)[0]
+        magie = struct.unpack_from("<H", roh, pe + 24)[0]
+        verzeichnis = pe + 24 + (96 if magie == 0x10B else 112)
+        import_rva = struct.unpack_from("<I", roh, verzeichnis + 8)[0]
+        if not import_rva:
+            return set()
+        abschnitte = []
+        start = pe + 24 + opt_groesse
+        anzahl = struct.unpack_from("<H", roh, pe + 6)[0]
+        for i in range(anzahl):
+            s = start + i * 40
+            v_adr = struct.unpack_from("<I", roh, s + 12)[0]
+            v_gr = struct.unpack_from("<I", roh, s + 8)[0]
+            r_zeiger = struct.unpack_from("<I", roh, s + 20)[0]
+            abschnitte.append((v_adr, v_gr, r_zeiger))
+
+        def dateilage(rva):
+            for v_adr, v_gr, r_zeiger in abschnitte:
+                if v_adr <= rva < v_adr + max(v_gr, 1):
+                    return r_zeiger + (rva - v_adr)
+            return None
+
+        lage = dateilage(import_rva)
+        if lage is None:
+            return set()
+        namen = set()
+        while True:
+            block = roh[lage:lage + 20]
+            if len(block) < 20 or block == b"\0" * 20:
+                break
+            name_rva = struct.unpack_from("<I", block, 12)[0]
+            if not name_rva:
+                break
+            nl = dateilage(name_rva)
+            if nl is not None:
+                ende = roh.find(b"\0", nl)
+                if ende > nl:
+                    namen.add(roh[nl:ende].decode("ascii",
+                                                  "ignore").lower())
+            lage += 20
+        return namen
+    except Exception:
+        return set()
+
+
+def _qt_module_im_projekt(quell_dir):
+    """
+    Liest alle .py des Projekts und gibt die benutzten PySide6-Module
+    zurueck. Findet er keine, gibt er None zurueck - dann bleibt
+    PySide6 unangetastet.
+    """
+    if not quell_dir or not os.path.isdir(quell_dir):
+        return None
+    import re
+    muster = re.compile(r"PySide6\.(Qt\w+)")
+    gefunden = set()
+    dateien = 0
+    for wurzel, ordner, namen in os.walk(quell_dir):
+        ordner[:] = [o for o in ordner
+                     if o not in ("__pycache__", "werkzeug", ".git")]
+        for name in namen:
+            if not name.endswith(".py"):
+                continue
+            dateien += 1
+            try:
+                with open(os.path.join(wurzel, name), "r",
+                          encoding="utf-8", errors="ignore") as f:
+                    for treffer in muster.findall(f.read()):
+                        gefunden.add(treffer)
+            except Exception:
+                pass
+    if not dateien or not gefunden:
+        return None
+    gefunden.update(QT_IMMER)
+    return gefunden
+
+
+def _qt_kette(qt, module):
+    """
+    Verfolgt von den benutzten Modulen aus die Importtabellen, bis
+    nichts Neues mehr dazukommt. Gibt die Namen aller Dateien zurueck,
+    die im Ordner PySide6 bleiben muessen, klein geschrieben.
+    """
+    vorhanden = {}
+    for eintrag in os.listdir(qt):
+        if os.path.isfile(os.path.join(qt, eintrag)):
+            vorhanden[eintrag.lower()] = eintrag
+
+    behalten = set()
+    offen = []
+
+    def aufnehmen(name):
+        klein = name.lower()
+        if klein in vorhanden and klein not in behalten:
+            behalten.add(klein)
+            offen.append(vorhanden[klein])
+
+    for modul in module:
+        aufnehmen(modul + ".pyd")
+        aufnehmen(modul + ".abi3.pyd")
+        aufnehmen("Qt6" + modul[2:] + ".dll")
+    for name in QT_IMMER_DATEIEN:
+        aufnehmen(name)
+    for klein in list(vorhanden):
+        if klein.startswith("pyside6") or klein.startswith("shiboken"):
+            aufnehmen(klein)
+
+    # Plugins stehen in keiner Importtabelle - Qt laedt sie zur
+    # Laufzeit. Ihre eigenen Abhaengigkeiten zaehlen aber mit.
+    plugins = os.path.join(qt, "plugins")
+    if os.path.isdir(plugins):
+        for unter in QT_PLUGINS_BLEIBEN:
+            pfad = os.path.join(plugins, unter)
+            if not os.path.isdir(pfad):
+                continue
+            for datei in os.listdir(pfad):
+                for gebraucht in _pe_importe(os.path.join(pfad, datei)):
+                    aufnehmen(gebraucht)
+
+    while offen:
+        datei = offen.pop()
+        for gebraucht in _pe_importe(os.path.join(qt, datei)):
+            aufnehmen(gebraucht)
+
+    return behalten
+
+
+def _qt_probelauf(ziel, module, log=None):
+    """
+    Startet das ausgeduennte PySide6 mit einem echten QApplication und
+    einem Fenster. Der Paketordner steht vorn im Suchpfad, damit nicht
+    das vollstaendige PySide6 des Baurechners einspringt. Gibt True
+    zurueck, wenn es traegt.
+    """
+    import subprocess
+    zeilen = ["import sys"]
+    for modul in sorted(module):
+        zeilen.append("import PySide6." + modul)
+    zeilen.append("from PySide6.QtWidgets import QApplication, QWidget")
+    zeilen.append("a = QApplication([])")
+    zeilen.append("w = QWidget()")
+    zeilen.append("w.show()")
+    zeilen.append("a.processEvents()")
+    zeilen.append("print('QT-OK')")
+    kode = "\n".join(zeilen)
+
+    umgebung = dict(os.environ)
+    umgebung["PYTHONPATH"] = ziel
+    umgebung["QT_QPA_PLATFORM"] = "offscreen"
+    try:
+        lauf = subprocess.run(
+            [sys.executable, "-c", kode],
+            capture_output=True, text=True, timeout=90,
+            env=umgebung, cwd=ziel)
+    except Exception as fehler:
+        _log(log, "Probelauf nicht moeglich: " + str(fehler))
+        return False
+    if lauf.returncode == 0 and "QT-OK" in (lauf.stdout or ""):
+        return True
+    meldung = (lauf.stderr or lauf.stdout or "").strip().splitlines()
+    _log(log, "Probelauf gescheitert: "
+         + (meldung[-1] if meldung else "ohne Meldung"))
+    return False
+
+
+def _qt_ausduennen(ziel, quell_dir, log=None):
+    """
+    Duennt PySide6 aus. Aussortiertes geht zuerst nach _verworfen;
+    geloescht wird erst, wenn der Probelauf bestanden ist.
+    """
+    qt = os.path.join(ziel, "PySide6")
+    if not os.path.isdir(qt):
+        return
+    module = _qt_module_im_projekt(quell_dir)
+    if not module:
+        _log(log, "PySide6 bleibt vollstaendig - keine Importe gemessen.")
+        return
+
+    vorher = _groesse(qt)
+    _log(log, "Qt-Module benutzt: " + ", ".join(sorted(module)))
+    behalten = _qt_kette(qt, module)
+    _log(log, "Gemessen ueber die Dateikoepfe: {} Dateien noetig.".format(
+        len(behalten)))
+
+    verworfen = os.path.join(ziel, "_verworfen")
+    shutil.rmtree(verworfen, ignore_errors=True)
+    os.makedirs(verworfen, exist_ok=True)
+
+    for eintrag in os.listdir(qt):
+        pfad = os.path.join(qt, eintrag)
+        if os.path.isdir(pfad):
+            if eintrag == "plugins":
+                for unter in os.listdir(pfad):
+                    if unter not in QT_PLUGINS_BLEIBEN:
+                        shutil.move(os.path.join(pfad, unter),
+                                    os.path.join(verworfen,
+                                                 "plugins_" + unter))
+                continue
+            if eintrag in QT_ORDNER_RAUS or eintrag == "__pycache__":
+                shutil.move(pfad, os.path.join(verworfen, eintrag))
+            continue
+        klein = eintrag.lower()
+        if klein in behalten:
+            continue
+        if klein.endswith((".dll", ".exe", ".pyd", ".pyi", ".lib")):
+            shutil.move(pfad, os.path.join(verworfen, eintrag))
+
+    if _qt_probelauf(ziel, module, log):
+        shutil.rmtree(verworfen, ignore_errors=True)
+        nachher = _groesse(qt)
+        _log(log, "PySide6 ausgeduennt: {:.1f} MB statt {:.1f} MB - "
+                  "Probelauf bestanden.".format(
+                      nachher / 1_048_576, vorher / 1_048_576))
+        return
+
+    # Zurueck auf Anfang. Ein grosses Paket ist besser als ein totes.
+    for eintrag in os.listdir(verworfen):
+        quelle = os.path.join(verworfen, eintrag)
+        if eintrag.startswith("plugins_"):
+            zurueck = os.path.join(qt, "plugins", eintrag[8:])
+        else:
+            zurueck = os.path.join(qt, eintrag)
+        try:
+            shutil.move(quelle, zurueck)
+        except Exception:
+            pass
+    shutil.rmtree(verworfen, ignore_errors=True)
+    _log(log, "ACHTUNG: Ausduennung zurueckgenommen, PySide6 bleibt "
+              "vollstaendig ({:.1f} MB).".format(vorher / 1_048_576))
+
+
+def sammle(app_dir, pakete, log=None, quell_dir=None):
     """
     Kopiert die genannten Pakete nach app_dir\\pakete und schreibt daneben
     anforderung.json. Gibt die Angaben als dict zurueck.
@@ -281,6 +562,7 @@ def sammle(app_dir, pakete, log=None):
         angaben["pakete"].append(paket)
         _log(log, "Mitgenommen: " + paket)
 
+    _qt_ausduennen(ziel, quell_dir, log)
     angaben["binaer"] = _ist_binaer(ziel)
     _log(log, "Ordner pakete: {:.1f} MB, {}".format(
         _groesse(ziel) / 1_048_576,

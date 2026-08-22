@@ -2963,7 +2963,8 @@ class KIPackager:
         else:
             self._log("Keine Fremdpakete noetig.")
 
-        angaben = pk.sammle(app_dir, pakete, log=self._log)
+        angaben = pk.sammle(app_dir, pakete, log=self._log,
+                            quell_dir=src_dir)
         if angaben.get("fehlend"):
             self._log("ACHTUNG: nicht gefunden - "
                       + ", ".join(angaben["fehlend"]))
