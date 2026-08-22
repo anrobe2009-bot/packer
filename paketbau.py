@@ -1,4 +1,4 @@
-# KI Packager 2.0 - Einzeldateien UND ganze Projekte verpacken
+# Packer 2.0 - Einzeldateien UND ganze Projekte verpacken
 # Neu: Projekt-Modus (Ordner + Startdatei), EXE-Modus via PyInstaller,
 #      automatischer Ausschluss ungenutzter Qt-Module, Deinstallation
 
@@ -74,9 +74,9 @@ def _sucht_eingaben(src_dir):
 def _base():
     return os.path.dirname(sys.executable if getattr(sys,"frozen",False) else os.path.abspath(__file__))
 
-FLAG = os.path.join(_base(), "ki_packager_accepted.flag")
+FLAG = os.path.join(_base(), "packer_accepted.flag")
 ZIEL_ORDNER = os.path.join(os.environ["USERPROFILE"], "Desktop", "KI Tools Stammtisch")
-# Die Marke. Sie steht in ki_packager_marke.json und wird auf jeden Text
+# Die Marke. Sie steht in packer_marke.json und wird auf jeden Text
 # angewendet, der das Haus verlaesst - Installierer, Deinstallierer,
 # Dokumentation, Name des Archivs.
 #
@@ -89,7 +89,7 @@ VORGABE_KUERZEL = "KI-Stammtisch"
 
 def _marke_lesen():
     pfad = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "ki_packager_marke.json")
+                        "packer_marke.json")
     firma, kuerzel = VORGABE_FIRMA, VORGABE_KUERZEL
     try:
         with open(pfad, "r", encoding="utf-8-sig") as fh:
@@ -120,8 +120,8 @@ def gepraegt(text):
 
 ZIP_PREFIX  = KUERZEL + "_"
 
-LOGO_MEMO = os.path.join(_base(), "ki_packager_logo.txt")
-BUILD_LOG = os.path.join(_base(), "ki_packager_build.log")
+LOGO_MEMO = os.path.join(_base(), "packer_logo.txt")
+BUILD_LOG = os.path.join(_base(), "packer_build.log")
 
 
 def _remember_logo_dir(path):
@@ -228,7 +228,7 @@ def show_splash():
                  font=("Segoe UI",16,"bold")).pack(pady=(24,6))
     tk.Label(root,text="KI Stammtisch Cologne",bg="#1a2332",fg="#8fa8c8",font=("Segoe UI",11)).pack()
     tk.Frame(root,bg="#2e4060",height=1,width=420).pack(pady=12)
-    tk.Label(root,text="KI Packager",bg="#1a2332",fg="#00e5c8",font=("Segoe UI",20,"bold")).pack()
+    tk.Label(root,text="Packer",bg="#1a2332",fg="#00e5c8",font=("Segoe UI",20,"bold")).pack()
     tk.Label(root,text="Build-Tool fuer KI Stammtisch Software",bg="#1a2332",fg="#8fa8c8",
              font=("Segoe UI",9)).pack(pady=(2,12))
     tk.Frame(root,bg="#2e4060",height=1,width=420).pack()
@@ -263,7 +263,7 @@ def show_splash():
 
 
 # ── Marke und Lizenz ─────────────────────────────────────────────────────────
-MARKE_DATEI = os.path.join(_base(), "ki_packager_marke.json")
+MARKE_DATEI = os.path.join(_base(), "packer_marke.json")
 GPL_CACHE = os.path.join(_base(), "gpl-3.0.txt")
 GPL_URL = "https://www.gnu.org/licenses/gpl-3.0.txt"
 
@@ -1288,7 +1288,7 @@ def _skip_grund(dateiname):
     # Eigene Einstellungen, nach der Form beurteilt statt nach einer
     # Liste von Namen. In einer Markendatei stehen Ablageorte, Pfade
     # und Namen - beim Empfaenger sind sie falsch und gehen ihn nichts
-    # an. Am 21.08.2026 waere ki_packager_marke.json mitgewandert,
+    # an. Am 21.08.2026 waere packer_marke.json mitgewandert,
     # weil der Filter nur settings.json und config.json kannte.
     stamm = os.path.splitext(n)[0]
     if endung in (".json", ".ini", ".cfg", ".conf", ".toml", ".yaml",
@@ -1841,10 +1841,132 @@ else {
 """
 
 # ── Haupt-GUI ────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------- Zoom ---
+# Strg-Plus, Strg-Minus, Strg-0. Siehe werkzeug\patch_zoom.py.
+
+import tkinter.font as _tkfont
+
+ZOOM_DATEI = os.path.join(_base(), "packer_zoom.txt")
+_ZOOM = {"faktor": 1.0}
+_ZOOM_BASIS = {}
+
+
+def _zoom_lesen():
+    """Die zuletzt gewaehlte Stufe holen. Fehlt sie, bleibt es bei 100."""
+    try:
+        with open(ZOOM_DATEI, "r", encoding="utf-8") as f:
+            wert = float(f.read().strip())
+        if 0.7 <= wert <= 3.0:
+            _ZOOM["faktor"] = wert
+    except Exception:
+        pass
+
+
+def _zoom_schreiben():
+    try:
+        with open(ZOOM_DATEI, "w", encoding="utf-8") as f:
+            f.write("%.2f" % _ZOOM["faktor"])
+    except Exception:
+        pass
+
+
+def _zoom_element(element, faktor):
+    """Eine einzelne Schrift stellen, immer von der Ursprungsgroesse aus."""
+    try:
+        roh = element.cget("font")
+    except Exception:
+        return
+    if not roh:
+        return
+
+    schluessel = str(element)
+    if schluessel not in _ZOOM_BASIS:
+        try:
+            schrift = _tkfont.Font(root=element, font=roh)
+            _ZOOM_BASIS[schluessel] = (
+                schrift.actual("family"),
+                abs(int(schrift.actual("size"))),
+                schrift.actual("weight"),
+                schrift.actual("slant"),
+            )
+        except Exception:
+            return
+
+    familie, groesse, gewicht, neigung = _ZOOM_BASIS[schluessel]
+    neu = max(6, int(round(groesse * faktor)))
+    stil = []
+    if gewicht == "bold":
+        stil.append("bold")
+    if neigung == "italic":
+        stil.append("italic")
+    try:
+        element.configure(font=tuple([familie, neu] + stil))
+    except Exception:
+        pass
+
+
+def _zoom_anwenden(wurzel, faktor=None):
+    """Den ganzen Baum durchgehen, einschliesslich offener Nebenfenster."""
+    if faktor is not None:
+        _ZOOM["faktor"] = max(0.7, min(3.0, round(faktor, 2)))
+    jetzt = _ZOOM["faktor"]
+
+    def lauf(element):
+        _zoom_element(element, jetzt)
+        try:
+            kinder = element.winfo_children()
+        except Exception:
+            return
+        for kind in kinder:
+            lauf(kind)
+
+    try:
+        lauf(wurzel)
+    except Exception:
+        pass
+    return jetzt
+
+
+def _zoom_stufe(wurzel, richtung):
+    """richtung 1 groesser, -1 kleiner, 0 zurueck auf normal."""
+    if richtung == 0:
+        neu = 1.0
+    else:
+        neu = _ZOOM["faktor"] + 0.1 * richtung
+    vorher = _ZOOM["faktor"]
+    _zoom_anwenden(wurzel, neu)
+    _zoom_schreiben()
+    try:
+        _ton("hinweis" if _ZOOM["faktor"] != vorher else "fehler")
+    except Exception:
+        pass
+
+
+def _zoom_einrichten(wurzel):
+    """Tasten legen und eine gemerkte Stufe wiederherstellen."""
+    _zoom_lesen()
+
+    for taste in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+        wurzel.bind(taste, lambda _e, w=wurzel: _zoom_stufe(w, 1))
+    for taste in ("<Control-minus>", "<Control-KP_Subtract>"):
+        wurzel.bind(taste, lambda _e, w=wurzel: _zoom_stufe(w, -1))
+    for taste in ("<Control-0>", "<Control-KP_0>"):
+        wurzel.bind(taste, lambda _e, w=wurzel: _zoom_stufe(w, 0))
+
+    # Das Einstellungsfenster entsteht erst spaeter. Nach F2 kurz warten,
+    # dann noch einmal durchgehen - sonst steht es in Normalgroesse da.
+    wurzel.bind("<F2>",
+                lambda _e, w=wurzel: w.after(400, lambda: _zoom_anwenden(w)),
+                add="+")
+
+    if _ZOOM["faktor"] != 1.0:
+        wurzel.after(200, lambda: _zoom_anwenden(wurzel))
+
+
 class KIPackager:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title(f"KI Packager {PACKAGER_VERSION}")
+        self.root.title(f"Packer {PACKAGER_VERSION}")
         self.root.configure(bg="#1a2332")
         self.root.minsize(840, 620)
         try:
@@ -1858,7 +1980,9 @@ class KIPackager:
         self._spinning = False
         self._build_ui()
         self.root.bind("<F2>", self._zeige_einstellungen)
+        self.root.after(700, self._pruefe_erststart)
         self.root.bind("<F5>", lambda _e: self._build())
+        _zoom_einrichten(self.root)
         self.root.mainloop()
 
     # ---------------------------------------------------------------- Aufbau
@@ -1876,7 +2000,7 @@ class KIPackager:
                 lb.pack(side="left", padx=16)
         except Exception:
             pass
-        tk.Label(hdr, text="KI Packager", bg="#0d1b2a", fg="#00e5c8",
+        tk.Label(hdr, text="Packer", bg="#0d1b2a", fg="#00e5c8",
                  font=("Segoe UI", 18, "bold")).pack(side="left")
         tk.Button(hdr, text="Einstellungen (F2)",
                   command=self._zeige_einstellungen,
@@ -2052,6 +2176,47 @@ class KIPackager:
                   bg="#00bfa5", fg="#0d1b2a", relief="flat",
                   font=("Segoe UI", 11, "bold"), cursor="hand2").pack(
                       side="right", padx=20)
+
+    def _pruefe_erststart(self):
+        """
+        Steht der Packer ohne Marke da, ist es sein erster Start.
+
+        Dann oeffnet er die Einstellungen von selbst und sagt, was er
+        braucht. Wer ihn frisch installiert hat, stuende sonst vor
+        einem Programm, das nichts von ihm weiss und nichts sagt.
+        """
+        try:
+            m = lade_marke()
+        except Exception:
+            m = {}
+        if not isinstance(m, dict):
+            m = {}
+
+        # Als eingerichtet gilt, wer einen Autor eingetragen hat. Der
+        # Rest hat brauchbare Vorgaben, der Autor nicht - er steht in
+        # jeder Lizenz, die der Packer schreibt.
+        if str(m.get("autor", "")).strip():
+            return
+
+        text = ("Willkommen. Dieser Packer ist noch nicht eingerichtet. "
+                "Bitte drei Angaben ergaenzen: die Ablage, also wohin "
+                "die fertigen Pakete gehen sollen. Den Autor, der als "
+                "Urheber in jeder Lizenz steht. Und die Lizenz selbst. "
+                "Das Fenster dafuer ist jetzt offen. Es laesst sich "
+                "spaeter jederzeit mit der Taste F 2 wieder aufrufen.")
+
+        self._log("Erster Start - der Packer ist noch nicht eingerichtet.")
+        self._log("Bitte Ablage, Autor und Lizenz eintragen. "
+                  "Spaeter jederzeit ueber F2 erreichbar.")
+        try:
+            _ton("hinweis")
+        except Exception:
+            pass
+        self._zeige_einstellungen()
+        try:
+            ph.sag(text)
+        except Exception:
+            pass
 
     def _zeige_einstellungen(self, *_):
         w = getattr(self, "_einst_fenster", None)
@@ -2405,7 +2570,7 @@ class KIPackager:
                     pass
                 except Exception:
                     pass
-            messagebox.showinfo("KI Packager", "Fertig gebaut!\n\n" + note)
+            messagebox.showinfo("Packer", "Fertig gebaut!\n\n" + note)
         else:
             self.progress_canvas.create_rectangle(0, 0, w, 8, fill="#e53935",
                                                   outline="")
@@ -2416,7 +2581,7 @@ class KIPackager:
                     pass
                 except Exception:
                     pass
-            messagebox.showerror("KI Packager",
+            messagebox.showerror("Packer",
                                  "Beim Bauen ist ein Fehler aufgetreten.\n\n"
                                  + note + "\n\nEinzelheiten im Log.")
 
@@ -2899,7 +3064,7 @@ class KIPackager:
             except Exception:
                 pass
             self._log("=" * 52)
-            self._log(f"KI Packager {PACKAGER_VERSION}")
+            self._log(f"Packer {PACKAGER_VERSION}")
             self._log(f"Packager-Ordner: {_base()}")
             self._log(f"Logo-Haken: {'an' if self.do_logo.get() else 'AUS'}")
             self._log(f"Gefundene Logos: {len(_find_logos())}")
