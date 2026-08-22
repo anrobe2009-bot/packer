@@ -73,6 +73,11 @@ def _module_von(verteilung):
                     treffer.append(modul)
     except Exception:
         pass
+    # packages_distributions nennt auch __pycache__: Python sieht es
+    # als Namensraum-Paket ueber alle site-packages hinweg. Wer das
+    # glaubt, kopiert fremde .pyc ins Paket und macht damit den Import
+    # beim naechsten Lauf kaputt. Gemessen am 22.08.2026.
+    treffer = [t for t in treffer if not _ist_intern(t)]
     return treffer or [verteilung]
 
 

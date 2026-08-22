@@ -155,9 +155,21 @@ def sprich_datei(app_dir, text, src_dir, log=None):
     try:
         import asyncio
         import edge_tts
-    except Exception:
-        _log(log, "edge-tts nicht vorhanden - die Einfuehrung wird beim "
-                  "Empfaenger von der Windows-Stimme gelesen.")
+    except Exception as fehler:
+        # Frueher stand hier eine feste Meldung: edge-tts nicht
+        # vorhanden. Sie stimmte selten. Ein ImportError tief in einer
+        # Abhaengigkeit sieht von aussen genauso aus wie ein fehlendes
+        # Paket - und schickt die Suche in die Irre.
+        fehlend = getattr(fehler, "name", "") or ""
+        if fehlend in ("edge_tts", "asyncio"):
+            _log(log, "edge-tts nicht vorhanden - die Einfuehrung wird "
+                      "beim Empfaenger von der Windows-Stimme gelesen.")
+        else:
+            _log(log, "edge-tts liess sich nicht laden: "
+                      + type(fehler).__name__ + ": " + str(fehler)
+                      + (" - es fehlt " + fehlend if fehlend else "")
+                      + ". Die Einfuehrung wird beim Empfaenger von der "
+                        "Windows-Stimme gelesen.")
         return ""
 
     # Der Screenreader stolpert ueber Striche und Rauten, die Stimme
@@ -206,7 +218,14 @@ def schreibe(app_dir, name, src_dir, log=None):
 
     # Gesprochen wird der Text und der Bedienhinweis, nicht aber die
     # Ueberschrift - der Programmname allein vorgelesen sagt nichts.
-    sprich_datei(app_dir, kurz + " " + hinweis, src_dir, log)
+    #
+    # Vorweg die Bestaetigung. Seit der Installation mit einem Klick
+    # ist diese Stimme das einzige, was dem Empfaenger sagt, dass es
+    # geklappt hat - der Installierer schweigt bewusst, sonst reden
+    # zwei zugleich. Nur gesprochen, nicht in der Datei: wer sie
+    # spaeter liest, ist laengst installiert.
+    ansage = (name + " ist installiert und startet jetzt. ")
+    sprich_datei(app_dir, ansage + kurz + " " + hinweis, src_dir, log)
     return True
 
 

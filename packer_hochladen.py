@@ -191,7 +191,7 @@ def bereitstellen(app_dir, name, zip_pfad, marke, log=None,
         ablage = str(marke.get("webseite", "")).strip() or ablage_webseite()
     if not ablage:
         _log(log, "In den Einstellungen fehlt der Ordner der Webseite.")
-        return None, "Kein Ordner fuer die Webseite eingetragen"
+        return None, "Kein Ordner für die Webseite eingetragen"
     if not os.path.isdir(ablage):
         _log(log, "Die Ablage der Webseite gibt es nicht: " + ablage)
         return None, "Ablage fehlt"
@@ -226,7 +226,7 @@ def bereitstellen(app_dir, name, zip_pfad, marke, log=None,
     _log(log, "paket.json geschrieben, Titel: " + angaben["titel"])
 
     bericht = ("{} steht auf der Webseite bereit. {:.0f} Megabyte. "
-               "{} Ein Neustart ist nicht noetig."
+               "{} Ein Neustart ist nicht nötig."
                .format(angaben["titel"], groesse,
                        "Mit gesprochener Vorstellung."
                        if mp3_da else "Ohne gesprochene Vorstellung."))
@@ -271,9 +271,14 @@ def oertlich_installieren(zip_pfad, name, log=None):
 
     _log(log, "Installation wird gestartet ...")
     try:
+        # -Sofort ist derselbe Weg, den INSTALLIEREN.bat beim
+        # Empfaenger nimmt: kein Fenster, keine Frage, danach startet
+        # das Programm und spricht seine Einfuehrung. Ohne den
+        # Schalter landet der Aufruf im Zweig mit Fenster - und Robert
+        # prueft einen Weg, den so niemand geht.
         subprocess.Popen(["powershell", "-NoProfile",
                           "-ExecutionPolicy", "Bypass",
-                          "-File", skript])
+                          "-File", skript, "-Sofort"])
     except Exception as e:
         _log(log, "Start gescheitert: " + str(e))
         shutil.rmtree(arbeit, ignore_errors=True)
@@ -282,7 +287,8 @@ def oertlich_installieren(zip_pfad, name, log=None):
     # Der Arbeitsordner bleibt liegen, bis die Installation ihn nicht
     # mehr braucht - sie kopiert daraus. Beim naechsten Mal wird er
     # ohnehin geleert.
-    return True, "Die Installation laeuft. Bitte dem Fenster folgen."
+    return True, ("Die Installation läuft. "
+                  "Gleich meldet sich das Programm selbst.")
 
 
 # ---------------------------------------------------------- Ansage ---
@@ -295,11 +301,33 @@ def sag(text, log=None):
     sauber = " ".join(str(text).split()).replace("'", "")
     if not sauber:
         return
-    befehl = ("Add-Type -AssemblyName System.Speech; "
-              "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-              "$s.Speak('" + sauber + "')")
+
+    # Der Text geht als Datei hinaus, nicht als Befehlszeile. Windows
+    # uebergibt Befehlszeilen in der alten Zeichentabelle der Konsole -
+    # aus laeuft wurde dabei luft. Als Datei mit UTF-8-Vorspann liest
+    # PowerShell die Kodierung selbst, und die Umlaute kommen an.
+    import tempfile
+    skript = None
     try:
-        subprocess.Popen(["powershell", "-NoProfile", "-Command", befehl],
+        kode = ("Add-Type -AssemblyName System.Speech\n"
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+                "$s.Speak('" + sauber + "')\n")
+        mit = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".ps1", delete=False, encoding="utf-8-sig")
+        # Das Skript raeumt sich selbst weg. Ohne diese Zeile
+        # sammeln sich in TEMP mit jeder Ansage Dateien an.
+        kode += "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force\n"
+        mit.write(kode)
+        mit.close()
+        skript = mit.name
+    except Exception as e:
+        _log(log, "Ansage nicht vorbereitet: " + str(e))
+        return
+
+    try:
+        subprocess.Popen(["powershell", "-NoProfile",
+                          "-ExecutionPolicy", "Bypass",
+                          "-File", skript],
                          creationflags=getattr(subprocess,
                                                "CREATE_NO_WINDOW", 0))
     except Exception as e:

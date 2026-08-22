@@ -1472,7 +1472,8 @@ def _build_doku(out_dir, name, script):
 
 
 # ── Installations-Skript (Fenster statt Konsole) ─────────────────────────────
-INSTALL_PS1 = r"""$ErrorActionPreference = "Stop"
+INSTALL_PS1 = r"""param([switch]$Sofort)
+$ErrorActionPreference = "Stop"
 $Name    = "~NAME~"
 
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
@@ -1821,6 +1822,64 @@ if ($MitFenster) {
 
     $f.Add_Shown({ $f.Activate(); $txtZiel.Focus(); $txtZiel.SelectAll() })
     [void]$f.ShowDialog()
+}
+elseif ($Sofort) {
+    # Ein Klick, keine Frage. Der Empfaenger soll nicht entscheiden
+    # muessen, wo ein Werkzeug liegt, das er noch gar nicht kennt.
+    # Wer waehlen will, nimmt INSTALLIEREN_MIT_WAHL.bat.
+    function Ton($hoch) {
+        try {
+            if ($hoch) { [Console]::Beep(880, 120); [Console]::Beep(1320, 160) }
+            else { [Console]::Beep(300, 250); [Console]::Beep(200, 350) }
+        } catch { }
+    }
+    Ton $true
+    try {
+        $z = Join-Path $Sammel $Name
+        $e = Installiere $z $true $true
+        Merke $Sammel $true $true
+        Ton $true
+        # Das Programm starten. Es spielt beim ersten Start selbst die
+        # gesprochene Einfuehrung ab - deshalb sagt der Installierer
+        # nichts, sonst reden zwei zugleich.
+        # Ueber den Explorer, nicht ueber Start-Process: Dieses Skript
+        # endet gleich, und ein mit Start-Process gestartetes Programm
+        # stirbt mit ihm. pythonw.exe tut das lautlos - kein Fenster,
+        # keine Meldung, nichts im Protokoll. Am 22.08.2026 hielt
+        # Robert die Installation deshalb dreimal fuer gescheitert,
+        # obwohl sie jedesmal durchlief.
+        #
+        # Der Explorer uebergibt an die Shell; der neue Prozess haengt
+        # danach an niemandem. Denselben Weg nimmt ein Doppelklick auf
+        # die Verknuepfung.
+        $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) `
+                         "$Name.lnk"
+        if (Test-Path $lnk) {
+            Start-Process -FilePath "explorer.exe" -ArgumentList "`"$lnk`""
+        }
+        else {
+            $start = Join-Path $e.Ziel "starter.py"
+            $py = Join-Path $e.Ziel "python\pythonw.exe"
+            if ((Test-Path $py) -and (Test-Path $start)) {
+                Start-Process -FilePath "cmd.exe" `
+                    -ArgumentList "/c start `"`" `"$py`" `"$start`"" `
+                    -WorkingDirectory $e.Ziel -WindowStyle Hidden
+            }
+        }
+        # Dem Programm Zeit lassen, sich zu zeigen, bevor dieses
+        # Skript endet.
+        Start-Sleep -Milliseconds 1500
+    }
+    catch {
+        Ton $false
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        [System.Windows.Forms.MessageBox]::Show(
+            "Die Installation ist fehlgeschlagen." +
+            [Environment]::NewLine + $_.Exception.Message, "Fehler",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        exit 1
+    }
 }
 else {
     Write-Host ""
@@ -3011,7 +3070,15 @@ class KIPackager:
         with open(os.path.join(release, "_install.ps1"), "w",
                   encoding="utf-8-sig") as f:
             f.write(ps1)
+        # Ein Klick, keine Frage. Der Schalter -Sofort setzt Ordner,
+        # Desktop und Startmenue selbst und startet das Programm.
         with open(os.path.join(release, "INSTALLIEREN.bat"), "w",
+                  encoding="utf-8") as f:
+            f.write("@echo off\r\nchcp 65001 >nul\r\n"
+                    'powershell -NoProfile -ExecutionPolicy Bypass -File '
+                    '"%~dp0_install.ps1" -Sofort\r\n')
+        # Wer waehlen will, kann. Dieselbe Routine, nur ohne Schalter.
+        with open(os.path.join(release, "INSTALLIEREN_MIT_WAHL.bat"), "w",
                   encoding="utf-8") as f:
             f.write("@echo off\r\nchcp 65001 >nul\r\n"
                     'powershell -NoProfile -ExecutionPolicy Bypass -File '
