@@ -1601,6 +1601,48 @@ function Installiere($Ziel, $Desktop, $Startmenue) {
         Start-Sleep -Milliseconds 1200
     }
 
+    # Alte Fassung entfernen, bevor etwas geschrieben wird. Sonst
+    # bleiben Dateien liegen, die das neue Paket nicht mehr kennt -
+    # am 22.08.2026 standen packer.py und paketbau.py nebeneinander.
+    # Geloescht wird nur Programmkode. Alles, was nach Einstellung,
+    # Protokoll oder Daten aussieht, bleibt - auch in python\, wo
+    # der Packer seine eigene Marke ablegt.
+    $SchonOrdner = @("data","daten","logs","log","cache","temp",
+                     "config","einstellungen","protokoll","profil",
+                     "failed_recordings","aufnahmen")
+    $SchonEndung = @(".json",".ini",".cfg",".toml",".yaml",".yml",
+                     ".dat",".key",".db",".txt",".log",".flag")
+    $entfernt = 0
+    function Raeume-Auf($Ordner, $Vorbild) {
+        foreach ($e in (Get-ChildItem -LiteralPath $Ordner -Force `
+                        -ErrorAction SilentlyContinue)) {
+            $klein = $e.Name.ToLower()
+            $imPaket = Join-Path $Vorbild $e.Name
+            if ($e.PSIsContainer) {
+                if ($SchonOrdner -contains $klein) { continue }
+                if (Test-Path -LiteralPath $imPaket) {
+                    # Ordner, den das Paket kennt: Stueck fuer Stueck.
+                    Raeume-Auf $e.FullName $imPaket
+                }
+                # Fremde Ordner bleiben unangetastet.
+                continue
+            }
+            if ($SchonEndung -contains $e.Extension.ToLower()) { continue }
+            if (Test-Path -LiteralPath $imPaket) { continue }
+            try {
+                Remove-Item -LiteralPath $e.FullName -Force -ErrorAction Stop
+                $script:entfernt++
+            } catch {
+                $script:hinweise += "Alte Datei liess sich nicht entfernen: " + $e.Name
+            }
+        }
+    }
+    if ((Test-Path -LiteralPath $Ziel) -and (Test-Path -LiteralPath $Quelle)) {
+        Raeume-Auf $Ziel $Quelle
+    }
+    if ($entfernt -gt 0) {
+        $hinweise += "Alte Fassung entfernt: $entfernt Dateien. Einstellungen, Protokolle und Daten blieben erhalten."
+    }
     $script:Liste = Join-Path $Ziel "installiert.txt"
     try {
         Set-Content -LiteralPath $script:Liste -Encoding UTF8 -Value @(
@@ -3030,7 +3072,8 @@ class KIPackager:
                 '  return $null\r\n'
                 '}\r\n'
                 '$Pyw = Finde-Pythonw\r\n'
-                'if (-not $Pyw) {\r\n'
+                '# Kein Abbruch: Im Paket liegt Python selbst mit.\r\n'
+                'if ($false) {\r\n'
                 '  try {\r\n'
                 '    Add-Type -AssemblyName System.Windows.Forms\r\n'
                 '    [System.Windows.Forms.MessageBox]::Show('
@@ -3052,8 +3095,19 @@ class KIPackager:
             zielsetzen = ('    $Eig = Join-Path $Ziel "python\\pythonw.exe"\r\n'
                           '    if (Test-Path -LiteralPath $Eig) {\r\n'
                           '        $s.TargetPath = $Eig\r\n'
-                          '    } else {\r\n'
+                          '    } elseif ($Pyw) {\r\n'
                           '        $s.TargetPath = $Pyw\r\n'
+                          '    } else {\r\n'
+                          '        try {\r\n'
+                          '            Add-Type -AssemblyName System.Windows.Forms\r\n'
+                          '            [System.Windows.Forms.MessageBox]::Show('
+                          '"Es wurde kein Python gefunden - weder im Paket '
+                          'noch auf diesem Rechner. Die Installation wird '
+                          'abgebrochen.", "Python fehlt") | Out-Null\r\n'
+                          '        } catch {\r\n'
+                          '            Write-Host "Kein Python gefunden - abgebrochen."\r\n'
+                          '        }\r\n'
+                          '        exit 1\r\n'
                           '    }\r\n'
                           '    $s.Arguments = "`"$Ziel\\' + pycname + '`""')
 
@@ -3111,7 +3165,7 @@ class KIPackager:
         self._log("INSTALLIEREN.bat erstellt - zeigt ein Fenster mit "
                   "beschrifteten Bedienelementen.")
         if not exe_path:
-            self._log("Die Verknuepfung sucht pythonw.exe zur Laufzeit.")
+            self._log("Die Verknuepfung nimmt das mitgelieferte Python; das des Zielrechners nur als Rueckfall.")
 
     def _do_build(self, mode, folder, entry, name, logo):
         note = ""
