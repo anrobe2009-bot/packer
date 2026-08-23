@@ -81,6 +81,38 @@ def _module_von(verteilung):
     return treffer or [verteilung]
 
 
+def _version_gilt(bedingung):
+    """
+    Prueft die python_version-Bedingung einer Abhaengigkeit gegen die
+    laufende Python-Version. Was nicht sicher zu lesen ist, gilt - eine
+    falsch verworfene Abhaengigkeit faellt erst beim Empfaenger auf.
+    """
+    import re
+    hier = sys.version_info[:2]
+    for zeichen, zahl in re.findall(
+            r"python_version\s*(<=|>=|==|!=|<|>)\s*[\"']([0-9.]+)[\"']",
+            bedingung):
+        try:
+            teile = tuple(int(t) for t in zahl.split(".")[:2])
+        except ValueError:
+            continue
+        while len(teile) < 2:
+            teile = teile + (0,)
+        if zeichen == "<" and not (hier < teile):
+            return False
+        if zeichen == "<=" and not (hier <= teile):
+            return False
+        if zeichen == ">" and not (hier > teile):
+            return False
+        if zeichen == ">=" and not (hier >= teile):
+            return False
+        if zeichen == "==" and not (hier == teile):
+            return False
+        if zeichen == "!=" and not (hier != teile):
+            return False
+    return True
+
+
 def _pflicht_abhaengigkeiten(verteilung):
     """
     Die Pakete, ohne die das genannte nicht laeuft.
@@ -108,6 +140,12 @@ def _pflicht_abhaengigkeiten(verteilung):
             if "sys_platform" in bedingung or "platform_system" in bedingung:
                 if not ("win32" in bedingung or "windows" in bedingung):
                     continue
+            # Versionsbedingungen gelten fuer die Version, gegen die
+            # gebaut wird. aiohttp nennt async-timeout nur fuer
+            # python_version < "3.11" - unter 3.13 gibt es das Paket
+            # gar nicht, und die Warnung war jedesmal grundlos.
+            if "python_version" in bedingung and not _version_gilt(bedingung):
+                continue
         name = zeile.split(";")[0].strip()
         for trenner in ("<", ">", "=", "!", "~", "[", " ", "("):
             name = name.split(trenner)[0]
@@ -125,6 +163,11 @@ def _ist_intern(name):
     n = name.strip()
     if not n:
         return True
+    # packages_distributions nennt auch Pfade statt Modulnamen -
+    # PySide6/Qt3DCore etwa. find_spec kann so etwas nie finden, und
+    # der Bau meldete jedesmal eine Luecke, die keine war.
+    if "/" in n or "\\" in n:
+        return True
     if n.endswith("__mypyc"):
         return True
     if n[0].isdigit():
@@ -132,6 +175,39 @@ def _ist_intern(name):
     if n.startswith("_") and not n.startswith("_cffi"):
         return True
     return False
+
+
+def _ohne_zwillinge(namen):
+    """
+    Entfernt Namen, die nur eine andere Schreibweise desselben Pakets
+    sind. packages_distributions nennt Shiboken und shiboken6 als
+    getrennte Eintraege, obwohl die C-Erweiterung im Ordner shiboken6
+    liegt und mit ihm kommt. Gesucht wurde sie bisher einzeln - und
+    jeder Bau meldete eine Luecke, die keine war.
+
+    Wegfallen darf ein Name nur, wenn ein anderer mit ihm beginnt und
+    danach ausschliesslich Ziffern folgen. So trifft die Regel
+    shiboken6, aber niemals attr neben attrs.
+
+    Zurueck kommen die verbliebenen Namen und die entfernten.
+    """
+    weg = []
+    behalten = []
+    for name in namen:
+        klein = name.lower()
+        zwilling = False
+        for anderer in namen:
+            k2 = anderer.lower()
+            if k2 == klein or not k2.startswith(klein):
+                continue
+            if k2[len(klein):].isdigit():
+                zwilling = True
+                break
+        if zwilling:
+            weg.append(name)
+        else:
+            behalten.append(name)
+    return behalten, weg
 
 
 def mit_abhaengigkeiten(module, log=None):
@@ -162,6 +238,9 @@ def mit_abhaengigkeiten(module, log=None):
                 offen.append(weiteres)
                 dazu.append(weiteres)
 
+    fertig, weg = _ohne_zwillinge(fertig)
+    if weg:
+        dazu = [d for d in dazu if d not in weg]
     if dazu:
         _log(log, "Zusaetzlich noetig, weil andere Pakete sie brauchen: "
              + ", ".join(sorted(set(dazu))))
