@@ -77,7 +77,11 @@ def _module_von(verteilung):
     # als Namensraum-Paket ueber alle site-packages hinweg. Wer das
     # glaubt, kopiert fremde .pyc ins Paket und macht damit den Import
     # beim naechsten Lauf kaputt. Gemessen am 22.08.2026.
-    treffer = [t for t in treffer if not _ist_intern(t)]
+    # Gemessen, nicht geraten. Frueher stand hier _ist_intern -
+    # das verwarf auch echte Dateien, deren Name mit einer Ziffer
+    # beginnt, und der Empfaenger stand ohne sie da.
+    # Gemessen am 23.08.2026 an schreiber.
+    treffer = [t for t in treffer if _mitnehmbar(t)]
     return treffer or [verteilung]
 
 
@@ -153,6 +157,42 @@ def _pflicht_abhaengigkeiten(verteilung):
         if name:
             raus.append(name)
     return raus
+
+
+def _mitnehmbar(name):
+    """Gehoert dieser Name ins Paket?
+
+    Gemessen, nicht nach dem Namen beurteilt: Was find_spec mit
+    einer echten Datei findet, wird mitgenommen. Namensraum-Pakete
+    ohne eigene Datei fallen weg - darunter __pycache__, das
+    packages_distributions faelschlich als Paket meldet.
+
+    Der Unterschied zu _ist_intern: Dort geht es um die Frage, ob
+    ein Name in einer import-Zeile stehen KANN. Hier geht es darum,
+    ob eine Datei existiert, die der Empfaenger braucht. Das ist
+    nicht dasselbe. 81d243bd2c585b0f4821__mypyc laesst sich nie
+    schreiben, wird aber zur Laufzeit von yarl nachgeladen und muss
+    darum mit.
+    """
+    n = (name or "").strip()
+    if not n:
+        return False
+    # Pfade statt Modulnamen, etwa PySide6/Qt3DCore.
+    if "/" in n or "\\" in n:
+        return False
+    import importlib.util
+    import importlib.util
+    try:
+        spec = importlib.util.find_spec(n)
+    except (ImportError, ValueError, AttributeError):
+        # Nur was beim Suchen selbst schiefgehen KANN. Ein
+        # breites except verschluckt Tippfehler und fehlende
+        # Importe - dann meldet der Bau still, es gebe nichts
+        # mitzunehmen. Gemessen am 23.08.2026.
+        return False
+    # origin ist None bei Namensraum-Paketen: kein Ordner, keine
+    # Datei, nichts zu kopieren.
+    return bool(spec and spec.origin)
 
 
 def _ist_intern(name):

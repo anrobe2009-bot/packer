@@ -63,16 +63,44 @@ def _aus_markdown(text):
     text = re.sub(r"```.*?```", "", text, flags=re.S)
     absaetze = []
     for roh in text.split("\n\n"):
-        zeile = roh.strip()
-        if not zeile or zeile.startswith("#"):
+        block = roh.strip()
+        if not block:
             continue
-        if zeile.startswith(("|", ">", "---", "===")):
+        if block.startswith(("|", ">", "---", "===")):
             continue
+        # Ueberschriften zeilenweise behandeln, nicht den ganzen
+        # Block verwerfen. In vielen Beschreibungen steht die
+        # Antwort direkt unter der Frage, im selben Block - wer die
+        # Ueberschrift wegwirft, wirft die Antwort mit weg.
+        # Gemessen am 23.08.2026 an Launcher\\README.TXT: 5715
+        # Zeichen Text ergaben null.
+        teile = []
+        for eine in block.split("\n"):
+            eine = eine.strip()
+            if not eine:
+                continue
+            if eine.startswith("#"):
+                kopf = eine.lstrip("#").strip()
+                # Eine Frage als Ueberschrift leitet die Antwort
+                # ein und wird mitgesprochen. Ein blosses Wort
+                # wie "Status" nicht - das klingt vorgelesen wie
+                # ein Stolpern.
+                if kopf.endswith("?"):
+                    teile.append(kopf)
+                continue
+            if eine.startswith(("|", ">", "---", "===")):
+                continue
+            teile.append(eine)
+        if not teile:
+            continue
+        zeile = " ".join(teile)
         zeile = re.sub(r"[*_`]", "", zeile)
         zeile = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", zeile)
         zeile = re.sub(r"^\s*[-*]\s+", "", zeile, flags=re.M)
         zeile = " ".join(zeile.split())
-        if len(zeile) > 40:
+        # Frueher lag die Schranke bei 40 Zeichen. Ein kurzer Satz
+        # ist aber kein Grund, ihn wegzuwerfen.
+        if len(zeile) > 25:
             absaetze.append(zeile)
         if sum(len(a) for a in absaetze) > MAX_ZEICHEN:
             break
@@ -105,7 +133,7 @@ def sammle_text(src_dir, name, log=None):
         except Exception:
             pass
 
-    for datei in ("LIESMICH.md", "README.md", "BEDIENUNG.md"):
+    for datei in _beschreibungen(src_dir):
         pfad = os.path.join(src_dir, datei)
         if os.path.exists(pfad):
             text = _aus_markdown(_lies(pfad))
@@ -122,6 +150,45 @@ def sammle_text(src_dir, name, log=None):
 
     _log(log, "Einfuehrung: kein Text gefunden.")
     return ""
+
+
+# Namen, unter denen Menschen ihre Beschreibung ablegen. Gesucht
+# wird der Name ohne Endung, klein geschrieben - damit sind
+# README.TXT, ReadMe.md und liesmich gleich behandelt.
+# Gemessen am 23.08.2026: README.TXT wurde uebersehen, weil die
+# alte Liste nur .md kannte.
+BESCHREIBUNG_NAMEN = (
+    "liesmich", "lies_mich", "lies mich",
+    "readme", "read_me", "read me",
+    "bedienung", "anleitung", "handbuch", "doku",
+)
+BESCHREIBUNG_ENDUNGEN = ("", ".md", ".txt", ".rst", ".markdown",
+                         ".text")
+
+
+def _beschreibungen(src_dir):
+    """Alle Dateien im Ordner, die eine Beschreibung sein koennten.
+
+    In der Reihenfolge von BESCHREIBUNG_NAMEN, damit LIESMICH vor
+    README kommt und README vor der Bedienungsanleitung. Gibt nur
+    Dateinamen zurueck, keine Pfade - der Aufrufer setzt sie selbst
+    zusammen.
+    """
+    try:
+        vorhanden = os.listdir(src_dir)
+    except Exception:
+        return []
+    treffer = []
+    for gesucht in BESCHREIBUNG_NAMEN:
+        for name in sorted(vorhanden):
+            wurzel, endung = os.path.splitext(name.lower())
+            if wurzel != gesucht:
+                continue
+            if endung not in BESCHREIBUNG_ENDUNGEN:
+                continue
+            if name not in treffer:
+                treffer.append(name)
+    return treffer
 
 
 STANDARD_STIMME = "de-DE-KatjaNeural"

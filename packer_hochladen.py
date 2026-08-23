@@ -145,11 +145,47 @@ def _text_aus(app_dir, name):
     return kurz[:200], lang
 
 
+def _firma_frisch():
+    """Die Marke bei jedem Schreiben neu lesen.
+
+    Nicht einmal beim Import und dann nie wieder - genau daran ist
+    die ZIP-Vorschau veraltet. Aendert Robert die Marke im laufenden
+    Fenster, gilt sie ab dem naechsten Bau.
+    """
+    try:
+        import packer
+        return str(packer._marke_lesen()[0]).strip()
+    except Exception:
+        return ""
+
+
+def _mit_marke(name, marke):
+    """Der Titel fuer die Webseite traegt die Marke vorn.
+
+    Die Marke, nicht den Urheber: Auf der Webseite steht, woher das
+    Werkzeug kommt. Wer es geschrieben hat, steht daneben im Feld
+    autor und in der Lizenz.
+
+    Der Ordnername bleibt blank - er ist die Adresse, unter der der
+    Server sucht. Der Titel ist das, was ein Fremder liest, und dort
+    gehoert die Herkunft hin.
+    """
+    titel = name[:1].upper() + name[1:]
+    firma = _firma_frisch()
+    if not firma:
+        return titel
+    if titel.lower().startswith(firma.lower()):
+        return titel
+    return firma + " " + titel
+
+
 def schreibe_paketjson(ordner, name, app_dir, marke, log=None):
     """Legt paket.json an - der Steckbrief fuer die Webseite."""
     kurz, lang = _text_aus(app_dir, name)
     angaben = {
-        "titel": name[:1].upper() + name[1:],
+        "titel": _mit_marke(name, marke),
+        "marke": _firma_frisch(),
+        "autor": str(marke.get("autor", "")).strip(),
         "version": str(marke.get("version", "")).strip() or "1.0",
         "kurz": kurz or ("Werkzeug von " + str(marke.get("autor", ""))),
         "installer": "INSTALLIEREN.bat",

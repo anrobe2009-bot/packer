@@ -2,7 +2,7 @@
 # Neu: Projekt-Modus (Ordner + Startdatei), EXE-Modus via PyInstaller,
 #      automatischer Ausschluss ungenutzter Qt-Module, Deinstallation
 
-import os, sys, io, re, json, shutil, subprocess, threading, ast, zipfile, datetime
+import os, sys, io, re, json, shutil, subprocess, threading, ast, zipfile, datetime, tempfile
 try: import winsound
 except ImportError: winsound = None
 
@@ -1214,6 +1214,55 @@ INHALT_MUSTER = (
 )
 
 
+# Anweisungsdateien fuer KI-Werkzeuge. Sie beschreiben Roberts
+# Arbeitsplatz - Pfade, Vorlieben, Regeln fuer die KI. Fuer den
+# Empfaenger sind sie wertlos und enthalten regelmaessig Pfade zum
+# Benutzerkonto. Sie kommen nicht ins Paket, so wie eine Datei mit
+# Zugangsdaten auch nicht hineinkommt.
+KI_ANWEISUNGEN = {
+    "claude.md", "agents.md", "gemini.md", "codex.md",
+    ".cursorrules", ".clinerules", ".windsurfrules",
+    "copilot-instructions.md", ".aider.conf.yml",
+}
+
+
+def _pfade_entschaerfen(dateien, log=None):
+    """Ersetzt den Benutzernamen in Pfaden durch <BENUTZER>.
+
+    Aus C:\\Users\\Entwickler\\Desktop wird
+    C:\\Users\\<BENUTZER>\\Desktop. Der Pfad bleibt lesbar, der
+    Name verschwindet. Kein Programm bricht davon - anders als
+    beim Herausschneiden eines Zugangsschluessels.
+
+    Gearbeitet wird ausschliesslich im Bauordner. Roberts eigene
+    Dateien werden nie angefasst.
+
+    Gibt zurueck, wie viele Stellen ersetzt wurden.
+    """
+    import re
+    muster = re.compile(r"([A-Za-z]:[\\/]Users[\\/])([^\\s\"'<>|)\\]\\\\/]+)")
+    gesamt = 0
+    for pfad in dateien:
+        try:
+            with open(pfad, "r", encoding="utf-8",
+                      errors="replace") as fh:
+                text = fh.read()
+        except Exception:
+            continue
+        neu, wieoft = muster.subn(r"\g<1><BENUTZER>", text)
+        if not wieoft:
+            continue
+        try:
+            with open(pfad, "w", encoding="utf-8") as fh:
+                fh.write(neu)
+            gesamt += wieoft
+        except Exception as e:
+            if log:
+                log("Konnte Pfade nicht ersetzen in "
+                    + os.path.basename(pfad) + ": " + str(e))
+    return gesamt
+
+
 def _inhalt_pruefen(dateien, log=None):
     """
     Sieht in die Dateien hinein. Gibt eine Liste der Fundstellen zurueck -
@@ -2142,7 +2191,7 @@ class KIPackager:
                  relief="flat", bd=4).grid(row=3, column=1, sticky="ew",
                                             padx=(8, 0), pady=6)
 
-        self.preview_var = tk.StringVar(value="ZIP-Name: " + ZIP_PREFIX + "...")
+        self.preview_var = tk.StringVar(value="ZIP-Name: ...")
         tk.Label(body, textvariable=self.preview_var, bg="#1a2332",
                  fg="#4a6a8a", font=("Segoe UI", 8)).grid(
                      row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -2619,7 +2668,7 @@ class KIPackager:
 
     def _update_preview(self, *_):
         raw = self.name_var.get().strip() or "..."
-        self.preview_var.set("ZIP-Name: " + ZIP_PREFIX + raw + ".zip")
+        self.preview_var.set("ZIP-Name: " + raw + ".zip")
 
     # ----------------------------------------------------------------- Log
     def _log(self, msg):
@@ -2870,23 +2919,56 @@ class KIPackager:
         alle = []
         for wurzel, ordner, dateien in os.walk(app_dir):
             ordner[:] = [d for d in ordner
-                         if d.lower() not in ("python", "pakete")]
+                         if d.lower() not in ("python", "pakete",
+                                              ".claude")]
             alle.extend(os.path.join(wurzel, d) for d in dateien)
+        # Anweisungen an KI-Werkzeuge gehoeren zum Arbeitsplatz,
+        # nicht zum Programm. Sie fliegen raus, bevor geprueft wird.
+        weg = [p for p in alle
+               if os.path.basename(p).lower() in KI_ANWEISUNGEN]
+        for p in weg:
+            try:
+                os.remove(p)
+                self._log("Nicht ins Paket: "
+                          + os.path.relpath(p, app_dir)
+                          + "   (Anweisung fuer KI-Werkzeuge)")
+            except Exception as e:
+                self._log("Konnte nicht entfernen: " + str(e))
+        alle = [p for p in alle if p not in weg]
         funde = _inhalt_pruefen(alle)
-        if funde:
-            self._log("ABBRUCH - private Angaben im Inhalt gefunden:")
-            for pfad, nr, was in funde[:20]:
+        # Zwei Sorten Fund, zwei Antworten. Ein Benutzername ist
+        # kein Geheimnis - er wird ersetzt und der Bau laeuft weiter.
+        # Ein Zugangsschluessel ist eines, und aus einer Programm-
+        # zeile laesst er sich nicht gefahrlos herausschneiden.
+        # Gemessen am 23.08.2026: vier Abbrueche wegen eines
+        # Benutzernamens in einer Anleitungsdatei.
+        pfad_funde = [f for f in funde if f[2] == "Pfad zum Benutzerkonto"]
+        schluessel = [f for f in funde if f[2] != "Pfad zum Benutzerkonto"]
+        if pfad_funde:
+            betroffen = sorted({f[0] for f in pfad_funde})
+            wieoft = _pfade_entschaerfen(betroffen, log=self._log)
+            self._log("Benutzerpfade ersetzt durch <BENUTZER>: "
+                      "{} Stelle(n) in {} Datei(en).".format(
+                          wieoft, len(betroffen)))
+            for pfad in betroffen[:10]:
+                self._log("   " + os.path.relpath(pfad, app_dir))
+        if schluessel:
+            self._log("ABBRUCH - Zugangsschluessel im Inhalt gefunden:")
+            for pfad, nr, was in schluessel[:20]:
                 self._log("   {}  Zeile {}  ({})".format(
                     os.path.relpath(pfad, app_dir), nr, was))
-            if len(funde) > 20:
-                self._log("   ... und {} weitere".format(len(funde) - 20))
-            self._log("Diese Dateien aus dem Projekt entfernen oder die "
-                      "Angaben herausnehmen, dann neu bauen.")
-            return None, ("Inhaltspruefung: " + str(len(funde))
-                          + " Fundstelle(n) mit privaten Angaben. "
+            if len(schluessel) > 20:
+                self._log("   ... und {} weitere".format(
+                    len(schluessel) - 20))
+            self._log("Ein Schluessel laesst sich nicht einfach "
+                      "herausnehmen - das Programm wuerde ihn beim "
+                      "Start vermissen. Den Wert im Projekt durch "
+                      "eine leere Zeichenkette ersetzen, dann neu "
+                      "bauen.")
+            return None, ("Zugangsschluessel gefunden: "
+                          + str(len(schluessel)) + " Stelle(n). "
                             "Siehe Log. Nichts wurde gepackt.")
-        self._log("Inhaltspruefung bestanden - keine privaten Pfade "
-                  "in den Dateien.")
+        self._log("Inhaltspruefung bestanden.")
 
         # Echte Zugangsschluessel. Eine Datendatei kann der Packager
         # weglassen - aus einer Programmdatei laesst sich nichts
@@ -3236,7 +3318,22 @@ class KIPackager:
 
             size = self._dir_size(app_dir)
             if self.do_zip.get():
-                zip_path = os.path.join(ablage, ZIP_PREFIX + name + ".zip")
+                # Der eigene Ordner bekommt den blanken Namen. Die
+                # Marke steht nur dort, wo Fremde sie sehen: auf der
+                # Webseite, in der paket.json.
+                # Geht das Paket ausschliesslich zur Webseite, dann
+                # entsteht das ZIP in einem Zwischenordner - der
+                # eigene Ordner bleibt unberuehrt.
+                _nur_web = (self.do_webseite.get()
+                            and not self.do_selbst.get())
+                if _nur_web:
+                    _zwischen = tempfile.mkdtemp(prefix="packer_web_")
+                    zip_path = os.path.join(_zwischen, name + ".zip")
+                    self._log("Nur fuer die Webseite - ZIP entsteht "
+                              "im Zwischenordner.")
+                else:
+                    _zwischen = ""
+                    zip_path = os.path.join(ablage, name + ".zip")
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED,
@@ -3319,6 +3416,12 @@ class KIPackager:
                           f"{_human(zsize)} gezippt.")
                 note = (f"{name}\n{_human(size)} entpackt, "
                         f"{_human(zsize)} gezippt.")
+                # Erst jetzt, denn bis hierhin wurde die Groesse
+                # noch aus der Datei gelesen.
+                if _zwischen:
+                    shutil.rmtree(_zwischen, ignore_errors=True)
+                    self._log("Zwischenordner entfernt. Im eigenen "
+                              "Ordner liegt nichts.")
             else:
                 note = f"{name}\n{_human(size)}"
 
