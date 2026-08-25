@@ -131,7 +131,11 @@ def _pth_oeffnen(ziel, version, log=None):
             neu.append(z)
 
     # Reihenfolge zaehlt: eigener Ordner, dann Lib, dann site-packages.
-    for eintrag in ("Lib\\site-packages", "Lib", "."):
+    # Reihenfolge nach dem Einfuegen: ., Lib, Lib\\site-packages, .., ..\\pakete
+    # .. und ..\\pakete sind noetig, weil das eingebettete Python PYTHONPATH
+    # ignoriert - ein Kindprozess ueber sys.executable faende sonst weder den
+    # Quellkode noch die Fremdpakete im Ordner pakete.
+    for eintrag in ("..\\pakete", "..", "Lib\\site-packages", "Lib", "."):
         if eintrag not in neu:
             neu.insert(0, eintrag)
 

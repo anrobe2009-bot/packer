@@ -582,6 +582,15 @@ SKIP_EXT = {".pyc", ".pyo", ".bak", ".orig", ".log", ".db", ".db-wal",
 SKIP_NAMES = {"thumbs.db", "desktop.ini", ".gitignore",
               "packer_zoom.txt"}
 
+# Ausfuehrbare Dateien duerfen nur mit ausdruecklicher Erlaubnis ins
+# Paket. Gemeint sind fremde Hilfsprogramme, die ein Projekt zur
+# Laufzeit aufruft. Selbst gebaute Programmdateien gehoeren nie hinein -
+# sie blaehen das Paket auf und loesen die Defender-Heuristik aus, genau
+# das, wogegen der Packer gebaut wurde. Eine EXE gehoert als Anhang an
+# eine Veroeffentlichung, nicht in den Quellkode.
+ERLAUBTE_PROGRAMME = {"ffmpeg.exe", "ffprobe.exe"}
+PROGRAMM_EXT = (".exe", ".msi", ".lnk", ".com", ".scr")
+
 # Ordner, in die das Programm zur Laufzeit schreibt. Ihr Inhalt gehoert
 # dem Nutzer, nicht dem Paket - und beim Empfaenger entstehen sie von
 # selbst neu. Am 19.08.2026 lagen sonst Zugangsschluessel und drei
@@ -1325,6 +1334,9 @@ def _skip_grund(dateiname):
                 if wort in n:
                     return "Zugangsdaten"
 
+    # Ausfuehrbare Dateien werden nicht hier beurteilt. Die
+    # Entscheidung braucht den ganzen Pfad und den Projektordner -
+    # siehe _exe_grund, aufgerufen aus _project_files.
     if endung in SKIP_EXT:
         if endung in (".bak", ".orig"):
             return "Sicherungsdatei"
@@ -1358,6 +1370,90 @@ def _skip_grund(dateiname):
     return ""
 
 
+# Ausfuehrbare Dateien, die der Packer mitgenommen hat. Wird bei jedem
+# Lauf von _project_files neu gefuellt und danach ins Protokoll geschrieben.
+_EXE_AUFGENOMMEN = []
+
+# Woran sich eine selbst gebaute Programmdatei erkennen laesst. Jedes
+# Bauwerkzeug hinterlaesst seine Spur im fertigen Programm.
+_GEBAUT_MARKER = (b"MEI\x0c\x0b\x0a\x0b\x0e", b"pyi-", b"_MEIPASS",
+                  b"PyInstaller", b"__nuitka", b"NUITKA_ONEFILE",
+                  b"py2exe", b"cx_Freeze", b"cx-Freeze")
+
+# Dateien, in denen ein Aufruf stehen kann. Eine EXE, deren Name nirgends
+# vorkommt, wird vom Programm nie gestartet.
+_TEXT_EXT = (".py", ".pyw", ".json", ".txt", ".md", ".bat", ".cmd", ".ps1",
+             ".ini", ".cfg", ".conf", ".toml", ".yaml", ".yml", ".html",
+             ".js", ".css", ".rst", ".env")
+
+
+def _selbst_gebaut(pfad):
+    """Traegt die Datei die Spur eines Bauwerkzeugs? Kopf und Fuss genuegen."""
+    try:
+        groesse = os.path.getsize(pfad)
+        with open(pfad, "rb") as f:
+            kopf = f.read(2 * 1024 * 1024)
+            if groesse > 4 * 1024 * 1024:
+                f.seek(max(0, groesse - 2 * 1024 * 1024))
+                fuss = f.read(2 * 1024 * 1024)
+            else:
+                fuss = b""
+    except OSError:
+        return False
+    for marker in _GEBAUT_MARKER:
+        if marker in kopf or marker in fuss:
+            return True
+    return False
+
+
+def _wird_genannt(ordner, name):
+    """Kommt der Dateiname irgendwo im Projekt vor - in Kode oder Konfig?"""
+    gesucht = name.lower().encode("utf-8")
+    for wurzel, ordner_, dateien in os.walk(ordner):
+        ordner_[:] = [d for d in ordner_ if d.lower() not in SKIP_DIRS]
+        for d in dateien:
+            if os.path.splitext(d)[1].lower() not in _TEXT_EXT:
+                continue
+            p = os.path.join(wurzel, d)
+            try:
+                if os.path.getsize(p) > 5 * 1024 * 1024:
+                    continue
+                with open(p, "rb") as f:
+                    if gesucht in f.read().lower():
+                        return True
+            except OSError:
+                continue
+    return False
+
+
+def _exe_grund(pfad, projektordner):
+    """
+    Warum eine ausfuehrbare Datei nicht ins Paket gehoert - oder leer,
+    wenn sie darf. Gemessen wird die Datei selbst, nicht ihr Name.
+
+    Eine selbst gebaute Programmdatei blaeht das Paket auf und loest beim
+    Empfaenger die Defender-Heuristik aus, genau das, wogegen der Packer
+    gebaut wurde. Ein fremdes Hilfsprogramm wie ffmpeg dagegen wird
+    gebraucht - ohne es startet das Programm beim Empfaenger nicht.
+    """
+    name = os.path.basename(pfad).lower()
+    stamm = os.path.splitext(name)[0]
+    werkzeug = os.path.basename(os.path.normpath(projektordner)).lower()
+
+    if name in ERLAUBTE_PROGRAMME:
+        _EXE_AUFGENOMMEN.append((name, "ausdruecklich erlaubt"))
+        return ""
+    if _selbst_gebaut(pfad):
+        return "selbst gebaute Programmdatei"
+    if stamm == werkzeug or stamm.endswith("_" + werkzeug) \
+            or stamm.startswith(werkzeug + "_"):
+        return "traegt den Namen des Werkzeugs"
+    if not _wird_genannt(projektordner, name):
+        return "wird im Projekt nirgends aufgerufen"
+    _EXE_AUFGENOMMEN.append((name, "wird im Projekt aufgerufen"))
+    return ""
+
+
 def _project_files(folder, mit_grund=False):
     """Alle Dateien des Projekts, die ins Paket gehoeren.
 
@@ -1365,6 +1461,7 @@ def _project_files(folder, mit_grund=False):
     Dateien samt Begruendung zurueck - die steht dann im Log, damit
     nachvollziehbar bleibt, was NICHT weitergegeben wird."""
     out, weg = [], []
+    del _EXE_AUFGENOMMEN[:]
     for root_, dirs, files in os.walk(folder):
         raus = [d for d in dirs if d.lower() in SKIP_DIRS]
         for d in raus:
@@ -1379,6 +1476,9 @@ def _project_files(folder, mit_grund=False):
             grund = _geheim_grund(fn)
             if not grund:
                 grund = _skip_grund(fn)
+            if not grund and os.path.splitext(fn)[1].lower() \
+                    in PROGRAMM_EXT:
+                grund = _exe_grund(os.path.join(root_, fn), folder)
             if grund:
                 weg.append((fn, grund))
                 continue
@@ -2820,6 +2920,9 @@ class KIPackager:
         os.makedirs(dest, exist_ok=True)
         if mode == "projekt":
             files, weg = _project_files(folder, mit_grund=True)
+            for _exe, _warum in _EXE_AUFGENOMMEN:
+                self._log("Ausfuehrbare Datei kommt MIT: "
+                          + _exe + "   (" + _warum + ")")
             if weg:
                 self._log(f"{len(weg)} Datei(en) bewusst NICHT ins Paket:")
                 # Die Laufvariable darf nicht name heissen - sie
@@ -3374,6 +3477,27 @@ class KIPackager:
                         0, lambda: self._finish_build(False, fehler))
                     return
                 self._log("Endkontrolle im Archiv bestanden.")
+                # Der ehrliche Test: nicht der Bauordner, sondern das
+                # fertige Archiv. Geprueft wird, was hinausgeht.
+                gut_arch, grund_arch = pk.pruefe_archiv(zip_path,
+                                                        log=self._log)
+                if not gut_arch:
+                    try:
+                        os.remove(zip_path)
+                    except OSError:
+                        pass
+                    self._log("Das Archiv wurde geloescht.")
+                    shutil.rmtree(work_base, ignore_errors=True)
+                    _ton("fehler")
+                    try:
+                        ph.sag("Das Paket hat den Probelauf nicht "
+                               "bestanden und wurde geloescht.")
+                    except Exception:
+                        pass
+                    fehler_arch = "Probelauf im Archiv: " + grund_arch
+                    self.root.after(
+                        0, lambda: self._finish_build(False, fehler_arch))
+                    return
 
                 # Fuer die Webseite bereitstellen. Der Server liest den
                 # Ablageordner selbst aus - was dort liegt, erscheint.

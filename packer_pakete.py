@@ -761,6 +761,49 @@ def schreibe_starter(app_dir, name, einstieg, log=None):
     return pfad
 
 
+def pruefe_archiv(zip_pfad, log=None):
+    """
+    Packt das fertige Archiv aus und laesst die Paketpruefung darauf los.
+
+    Der Unterschied zur Pruefung im Bauordner ist klein, aber
+    entscheidend: Geprueft wird, was tatsaechlich hinausgeht. Was beim
+    Packen verlorengeht oder beschaedigt wird, faellt sonst erst beim
+    Empfaenger auf - und der kann nichts dagegen tun.
+
+    Gibt (True, Meldung) zurueck, wenn das Paket laedt.
+    """
+    import tempfile
+    import zipfile
+
+    if not zip_pfad or not os.path.exists(zip_pfad):
+        return True, "kein Archiv"
+
+    arbeit = tempfile.mkdtemp(prefix="probelauf_archiv_")
+    try:
+        try:
+            with zipfile.ZipFile(zip_pfad) as zf:
+                zf.extractall(arbeit)
+        except Exception as e:
+            _log(log, "Das Archiv liess sich nicht auspacken: " + str(e))
+            return False, "Archiv nicht lesbar"
+
+        # Der Programmordner ist der, in dem anforderung.json liegt.
+        ziel = None
+        for wurzel, _ordner, dateien in os.walk(arbeit):
+            if "anforderung.json" in dateien:
+                ziel = wurzel
+                break
+        if not ziel:
+            _log(log, "Probelauf im Archiv entfaellt - keine "
+                      "anforderung.json im Paket.")
+            return True, "nichts zu pruefen"
+
+        _log(log, "Probelauf im ausgepackten Archiv ...")
+        return probelauf(ziel, log=log)
+    finally:
+        shutil.rmtree(arbeit, ignore_errors=True)
+
+
 def probelauf(app_dir, python_exe=None, log=None):
     """
     Startet den Starter einmal mit abgeschalteter Oberflaeche und prueft,
@@ -784,21 +827,63 @@ def probelauf(app_dir, python_exe=None, log=None):
         _log(log, "Keine Pakete zu pruefen.")
         return True, ""
 
-    kode = ("import sys, os; sys.path.insert(0, os.path.join(r'"
-            + app_dir + "', 'pakete'));"
-            + "".join("import " + p + ";" for p in pakete)
-            + "print('ok')")
+    # Der entscheidende Unterschied: Mit dem mitgelieferten Python wird
+    # NICHTS gesetzt. Die Pakete muessen allein ueber python313._pth
+    # gefunden werden - dem Weg, den der Empfaenger geht. Wer hier
+    # sys.path ergaenzt, repariert den Fehler waehrend der Messung und
+    # bekommt ein bestanden, das nichts wert ist.
+    eigenes_python = os.path.normcase(os.path.abspath(python_exe)).startswith(
+        os.path.normcase(os.path.abspath(os.path.join(app_dir, "python"))))
+
+    vorspann = ""
+    if not eigenes_python:
+        # Rueckfall auf das Python des Baurechners. Es hat keine _pth des
+        # Pakets, also muss der Ordner hier eingehaengt werden.
+        vorspann = ("sys.path.insert(0, os.path.join(r'" + app_dir
+                    + "', 'pakete'));")
+
+    kode = ("import sys, os, importlib;" + vorspann
+            + "fehlt=[]\n"
+            "for n in " + repr(pakete) + ":\n"
+            "    try:\n"
+            "        importlib.import_module(n)\n"
+            "    except BaseException as e:\n"
+            "        fehlt.append(n + ' (' + e.__class__.__name__ + ')')\n"
+            "print('FEHLT ' + ', '.join(fehlt)) if fehlt"
+            " else print('PAKETE_OK')\n"
+            "sys.exit(1 if fehlt else 0)\n")
     try:
-        p = subprocess.run([python_exe, "-c", kode], capture_output=True,
-                           text=True, timeout=60,
+        # -s und -E sind entscheidend. Ohne sie zieht das mitgelieferte
+        # Python das Benutzerverzeichnis des Baurechners herein - bei
+        # Robert AppData\Roaming\Python\Python313\site-packages - und
+        # findet dort alles, was im Paket fehlt. Gemessen am 25.08.2026:
+        # Ein Paket ohne die Zeile ..\pakete in python313._pth bestand
+        # die Pruefung trotzdem. Beim Empfaenger gibt es diesen Ordner
+        # nicht, und das Programm startet nicht.
+        p = subprocess.run([python_exe, "-s", "-E", "-c", kode],
+                           capture_output=True,
+                           text=True, timeout=120,
+                           cwd=app_dir,
                            creationflags=getattr(subprocess,
                                                  "CREATE_NO_WINDOW", 0))
-        if "ok" in (p.stdout or ""):
-            _log(log, "Paketpruefung bestanden: " + ", ".join(pakete))
+        # Auf eine eindeutige Marke pruefen, nicht auf ok irgendwo im
+        # Text: shiboken6 enthaelt die Buchstaben ok, und damit bestand
+        # am 25.08.2026 ein Paket, in dem alle fuenf Pakete fehlten.
+        zeilen_aus = [z.strip() for z in (p.stdout or "").splitlines()]
+        if "PAKETE_OK" in zeilen_aus and p.returncode == 0:
+            _log(log, "Paketpruefung bestanden ({}): {}".format(
+                "eigenes Python" if eigenes_python else "fremdes Python",
+                ", ".join(pakete)))
             return True, ""
-        zeilen = (p.stderr or p.stdout or "").strip().splitlines()
-        grund = zeilen[-1] if zeilen else "unbekannt"
-        _log(log, "Paketpruefung gescheitert: " + grund)
+        zeilen = (p.stdout or "").strip().splitlines()
+        fehlend = [z[6:] for z in zeilen if z.startswith("FEHLT ")]
+        if fehlend:
+            grund = fehlend[0]
+        else:
+            zeilen = (p.stderr or p.stdout or "").strip().splitlines()
+            grund = zeilen[-1] if zeilen else "unbekannt"
+        _log(log, "PAKETPRUEFUNG GESCHEITERT - laesst sich nicht laden:")
+        _log(log, "   " + grund)
         return False, grund
     except Exception as e:
         _log(log, "Paketpruefung nicht moeglich: " + str(e))
