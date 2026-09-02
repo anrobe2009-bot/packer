@@ -206,6 +206,68 @@ def schreibe_paketjson(ordner, name, app_dir, marke, log=None):
 
 # -------------------------------------------------- Fuer die Webseite ---
 
+# -------------------------------------------- Vorstellung fuer das Netz ---
+# Die Webseite bekommt eine eigene MP3. Die Einfuehrung aus dem Paket
+# taugt dort nicht: sie sagt, das Programm sei installiert und starte
+# jetzt, und nennt Tasten. Auf der Seite ist noch nichts installiert.
+
+WERBUNG_MAX = 700
+
+
+def _werbetext(name, app_dir, marke):
+    """Der Text, der auf der Webseite gesprochen wird.
+
+    Er wirbt fuer das Werkzeug: was es ist, von wem es kommt, wie man
+    es bekommt. Er nennt keine Installation und keine Tasten.
+    """
+    _kurz, lang = _text_aus(app_dir, name)
+    lang = " ".join((lang or "").split())
+    if len(lang) > WERBUNG_MAX:
+        schnitt = lang.rfind(". ", 0, WERBUNG_MAX)
+        lang = lang[:schnitt + 1] if schnitt > 200 else lang[:WERBUNG_MAX]
+
+    # Beginnt die Beschreibung selbst mit dem Namen, entfaellt der
+    # Vorspann - sonst sagt die Stimme den Namen zweimal.
+    teile = []
+    if lang and lang.lower().startswith(name.lower()):
+        teile.append(lang)
+    else:
+        teile.append(name + ".")
+        if lang:
+            teile.append(lang)
+    autor = str(marke.get("autor", "")).strip()
+    if autor:
+        teile.append("Ein Werkzeug von " + autor + ".")
+    teile.append("Es ist kostenlos, der Quellcode liegt offen. "
+                 "Auf dieser Seite k\u00f6nnen Sie es herunterladen "
+                 "und mit einem Klick einrichten.")
+    return " ".join(teile)
+
+
+def _vorstellung_sprechen(ordner, name, app_dir, marke, log=None):
+    """Spricht die Vorstellung direkt in den Webseiten-Ordner.
+
+    Nicht in app_dir: was dort liegt, wandert ins ZIP, und im ZIP hat
+    eine Werbe-MP3 nichts verloren.
+    """
+    try:
+        import packer_einfuehrung as _pe
+    except Exception as fehler:
+        _log(log, "packer_einfuehrung nicht ladbar: " + str(fehler))
+        return False
+    text = _werbetext(name, app_dir, marke)
+    # vorstellung.mp3, nicht einfuehrung.mp3: im Paket liegt unter
+    # diesem Namen ein anderer Text. Die Webseite sucht nach der
+    # Endung, nicht nach dem Namen - gemessen am 28.08.2026.
+    ziel = os.path.join(ordner, "audio", "vorstellung.mp3")
+    if _pe.sprich_text(ziel, text, log=log):
+        _log(log, "Vorstellung fuer die Webseite gesprochen.")
+        return True
+    _log(log, "Ohne gesprochene Vorstellung - auf der Seite fehlt nur "
+              "der Anhoeren-Knopf.")
+    return False
+
+
 def bereitstellen(app_dir, name, zip_pfad, marke, log=None,
                   ablage=None):
     """
@@ -246,17 +308,10 @@ def bereitstellen(app_dir, name, zip_pfad, marke, log=None,
     groesse = os.path.getsize(ziel_zip) / 1_048_576
     _log(log, "Archiv abgelegt: {} ({:.0f} MB)".format(ziel_zip, groesse))
 
-    mp3_da = False
-    quelle_mp3 = os.path.join(app_dir, "einfuehrung.mp3")
-    if os.path.exists(quelle_mp3):
-        os.makedirs(os.path.join(ordner, "audio"), exist_ok=True)
-        shutil.copy2(quelle_mp3, os.path.join(ordner, "audio",
-                                              "einfuehrung.mp3"))
-        mp3_da = True
-        _log(log, "Gesprochene Vorstellung abgelegt.")
-    else:
-        _log(log, "Keine MP3 gefunden - auf der Seite fehlt nur der "
-                  "Anhoeren-Knopf.")
+    # Eigener Text fuer die Webseite. Die Einfuehrung aus dem Paket
+    # wird bewusst NICHT kopiert - sie meldet eine Installation, die
+    # hier noch gar nicht stattgefunden hat.
+    mp3_da = _vorstellung_sprechen(ordner, name, app_dir, marke, log)
 
     _pfad, angaben = schreibe_paketjson(ordner, kurz, app_dir, marke, log)
     _log(log, "paket.json geschrieben, Titel: " + angaben["titel"])

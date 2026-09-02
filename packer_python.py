@@ -135,7 +135,7 @@ def _pth_oeffnen(ziel, version, log=None):
     # .. und ..\\pakete sind noetig, weil das eingebettete Python PYTHONPATH
     # ignoriert - ein Kindprozess ueber sys.executable faende sonst weder den
     # Quellkode noch die Fremdpakete im Ordner pakete.
-    for eintrag in ("..\\pakete", "..", "Lib\\site-packages", "Lib", "."):
+    for eintrag in ("..\\pakete", "..\\pakete\\win32", "..\\pakete\\win32\\lib", "..", "Lib\\site-packages", "Lib", "."):
         if eintrag not in neu:
             neu.insert(0, eintrag)
 

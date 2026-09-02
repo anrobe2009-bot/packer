@@ -123,6 +123,27 @@ ZIP_PREFIX  = KUERZEL + "_"
 LOGO_MEMO = os.path.join(_base(), "packer_logo.txt")
 BUILD_LOG = os.path.join(_base(), "packer_build.log")
 
+# Das Bauprotokoll wird bei JEDEM Bau geloescht. Am 01.09.2026 war
+# deshalb das Protokoll eines fremden Laufs zu sehen, waehrend der
+# gesuchte Bau laengst ueberschrieben war - und der Fehler blieb eine
+# Stunde lang unauffindbar.
+#
+# Dieses Protokoll haengt an und bleibt. Nur Fehler und Abbrueche,
+# damit es nicht zuwaechst.
+FEHLER_LOG = os.path.join(_base(), "packer_fehler.log")
+
+
+def fehler_merken(text, name=""):
+    """Schreibt einen Fehler mit Zeitstempel ans Ende des Protokolls."""
+    import datetime
+    try:
+        with open(FEHLER_LOG, "a", encoding="utf-8") as f:
+            f.write("{}  {}\n".format(
+                datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+                (name + ": " if name else "") + str(text)))
+    except Exception:
+        pass
+
 
 def _remember_logo_dir(path):
     """Merkt sich, wo die Logos liegen - damit sie nach einem Umzug
@@ -270,7 +291,7 @@ GPL_URL = "https://www.gnu.org/licenses/gpl-3.0.txt"
 MARKE_VORGABE = {
     "autor": "KI Stammtisch Cologne",
     "web": "https://ki-stammtisch-cologne.de",
-    "lizenz": "GPL-3.0",
+    "lizenz": "MIT",
 }
 
 MIT_TEXT = """MIT License
@@ -445,6 +466,59 @@ def _img(path, size=None):
     img = Image.open(path)
     if size: img = img.resize((size,size), Image.LANCZOS)
     return ImageTk.PhotoImage(img)
+_SPLASH_MP3 = os.path.join(_base(), 'splash.mp3')
+_stimme_laeuft = [False]
+# Laenge der Sprachdatei in Millisekunden, gemessen statt geschaetzt.
+_dauer = [0]
+
+
+def _stimme_an():
+    # Spielt splash.mp3, wenn sie beiliegt. Sie entsteht beim Bauen
+    # mit edge-tts, Stimme Katja - der Empfaenger braucht weder
+    # edge-tts noch Internet, nur die Datei.
+    #
+    # Faellt sie aus, bleibt das Fenster still, aber es klemmt nicht:
+    # nach zehn Sekunden geht es ohnehin weiter.
+    if not os.path.exists(_SPLASH_MP3):
+        return
+    try:
+        from ctypes import windll
+        windll.winmm.mciSendStringW(
+            'open ' + chr(34) + _SPLASH_MP3 + chr(34)
+            + ' type mpegvideo alias splashton', None, 0, None)
+        windll.winmm.mciSendStringW('play splashton', None, 0, None)
+        _stimme_laeuft[0] = True
+        # Wie lang ist die Datei wirklich? Nicht aus der Zeichenzahl
+        # rechnen - am 02.09.2026 ergab ein Satz von 232 Zeichen rund
+        # 15 Sekunden, waehrend das Fenster nach zehn schloss und den
+        # Hinweis auf die Eingabetaste verschluckte.
+        try:
+            from ctypes import create_unicode_buffer
+            puffer = create_unicode_buffer(64)
+            windll.winmm.mciSendStringW(
+                'status splashton length', puffer, 64, None)
+            if puffer.value.strip().isdigit():
+                _dauer[0] = int(puffer.value.strip())
+        except Exception:
+            pass
+    except Exception:
+        _stimme_laeuft[0] = False
+
+
+def _stimme_aus():
+    # Beendet die Stimme, bevor das Fenster schliesst. Sonst spraeche
+    # der Splash noch, waehrend die Einfuehrung des Programms
+    # beginnt - zwei Stimmen zugleich sind schlimmer als keine.
+    if not _stimme_laeuft[0]:
+        return
+    try:
+        from ctypes import windll
+        windll.winmm.mciSendStringW('close splashton', None, 0, None)
+    except Exception:
+        pass
+    _stimme_laeuft[0] = False
+
+
 def show_splash():
     root = tk.Tk()
     root.title("KI Stammtisch Cologne - "+APP_NAME)
@@ -475,29 +549,46 @@ def show_splash():
          "Weitergabe erwuenscht - bitte vollstaendig, mit LICENSE.txt und NOTICE.txt.")
     tk.Label(root,text=msg,bg="#1a2332",fg="#8fa8c8",font=("Segoe UI",9),
              justify="center",wraplength=400).pack(pady=8)
-    var=tk.BooleanVar(value=False)
-    cb=tk.Checkbutton(root,
-        text="Ich habe den Hinweis gelesen und nutze das Tool auf eigene Gefahr.",
-        variable=var,bg="#1a2332",fg="#e8edf5",selectcolor="#2e4060",
-        activebackground="#1a2332",activeforeground="#00e5c8",
-        font=("Segoe UI",10),wraplength=400,justify="left",cursor="hand2")
-    cb.pack(padx=20)
-    btn=tk.Button(root,text="  Starten  ",
-        bg="#0d3b66",fg="#e8edf5",disabledforeground="#4a5a70",
-        activebackground="#00e5c8",activeforeground="#1a2332",
-        font=("Segoe UI",13,"bold"),bd=0,padx=24,pady=14,
-        cursor="hand2",relief="flat",state="disabled")
+    tk.Label(root,text='Eingabetaste - oder zehn Sekunden warten',
+             bg='#1a2332',fg='#00e5c8',
+             font=('Segoe UI',11,'bold')).pack(pady=(8,0))
+    btn=tk.Button(root,text='  Weiter  ',
+        bg='#0d3b66',fg='#e8edf5',
+        activebackground='#00e5c8',activeforeground='#1a2332',
+        font=('Segoe UI',13,'bold'),bd=0,padx=24,pady=14,
+        cursor='hand2',relief='flat')
     btn.pack(pady=(16,24))
-    def _cb(*_): btn.config(state="normal" if var.get() else "disabled")
-    def _go():
+
+    # Kein Haekchen mehr. Wer nichts sieht, findet es nicht, und der
+    # Starten-Knopf blieb ohne es grau - das Programm schien zu
+    # haengen. Der Haftungsausschluss steht in LICENSE.txt und
+    # NOTICE.txt; ein Klick aendert daran nichts.
+    def _go(*_):
         accepted[0]=True
-        try: open(FLAG,"w").write("ok")
+        try: open(FLAG,'w').write('ok')
         except Exception: pass
-        root.destroy()
-    def _close(): root.destroy(); sys.exit(0)
-    cb.config(command=_cb)
+        try: _stimme_aus()
+        except Exception: pass
+        try: root.destroy()
+        except Exception: pass
     btn.config(command=_go)
-    root.protocol("WM_DELETE_WINDOW",_close)
+    root.protocol('WM_DELETE_WINDOW',_go)
+    root.bind('<Return>',_go)
+    root.bind('<KP_Enter>',_go)
+    root.bind('<space>',_go)
+    root.bind('<Escape>',_go)
+    btn.focus_set()
+
+    # Katja spricht den Haftungsausschluss. Ohne sie sitzt ein
+    # blinder Empfaenger vor einem stummen Fenster.
+    _stimme_an()
+
+    # So lange, wie die Stimme wirklich braucht - mindestens zehn
+    # Sekunden, und eine Sekunde Nachlauf, damit der letzte Satz
+    # ausklingt. Der Empfaenger muss nichts druecken; wer schneller
+    # sein will, nimmt die Eingabetaste.
+    _warten = max(10000, _dauer[0] + 1000)
+    root.after(_warten,_go)
     root.mainloop()
     return accepted[0]
 if not os.path.exists(FLAG):
@@ -1016,6 +1107,64 @@ QT_BALLAST = [
 ]
 
 
+def _importe_im_try(baum):
+    """Namen, die nur innerhalb eines try importiert werden.
+
+    Ein solcher Import ist als verzichtbar gekennzeichnet: Das
+    Programm faengt den ImportError ab und hat einen Rueckfall.
+    Am 01.09.2026 gemessen an deploy_anzeige.py und
+    launcher_daten.py - kis_toene und assi_farben stehen dort im
+    try, und beide Werkzeuge laufen ohne sie.
+
+    Fehlt ein solches Modul, wird das gemeldet, aber nicht
+    abgebrochen. Fehlt eines von der obersten Ebene, stuerzt das
+    Programm beim Start ab - das bricht den Bau.
+    """
+    weich = set()
+    for knoten in ast.walk(baum):
+        if not isinstance(knoten, ast.Try):
+            continue
+        for k in ast.walk(knoten):
+            if isinstance(k, ast.Import):
+                for a in k.names:
+                    weich.add(a.name.split(".")[0])
+            elif isinstance(k, ast.ImportFrom):
+                if not k.level and k.module:
+                    weich.add(k.module.split(".")[0])
+    return weich
+
+
+def _module_per_m(baum):
+    """Module, die als Unterprozess mit -m gerufen werden.
+
+    atb_stimme.py ruft edge-tts so auf:
+        [sys.executable, "-m", "edge_tts", ...]
+    Kein import - eine Suche nach Importen findet das nie. Am
+    01.09.2026 fehlten dadurch edge_tts und vierzehn Folgepakete
+    im Paket der AI Terminal Bridge.
+
+    Gesucht wird die feste Form: die Zeichenkette -m, unmittelbar
+    gefolgt von einem Namen. Das ist messbar, nicht geraten.
+    """
+    treffer = set()
+    for knoten in ast.walk(baum):
+        if not isinstance(knoten, (ast.List, ast.Tuple)):
+            continue
+        werte = knoten.elts
+        for i, teil in enumerate(werte[:-1]):
+            if not isinstance(teil, ast.Constant):
+                continue
+            if teil.value != "-m":
+                continue
+            weiter = werte[i + 1]
+            if isinstance(weiter, ast.Constant) and \
+                    isinstance(weiter.value, str):
+                name = weiter.value.split(".")[0].strip()
+                if name and name.isidentifier():
+                    treffer.add(name)
+    return treffer
+
+
 def _scan_requirements(pyfiles):
     """Ermittelt, welche Fremdpakete das Projekt braucht.
     Standardbibliothek und projekteigene Module fallen raus."""
@@ -1045,7 +1194,28 @@ def _scan_requirements(pyfiles):
                 if top.startswith("_"):
                     continue
                 found[top] = PIP_NAMES.get(top, top)
+        # Was per Unterprozess gerufen wird, steht in keinem import.
+        for name in _module_per_m(tree):
+            if name in stdlib or name in local or name.startswith("_"):
+                continue
+            if name in ("pip", "venv", "ensurepip"):
+                continue
+            if name not in found:
+                found[name] = PIP_NAMES.get(name, name)
     return dict(sorted(found.items()))
+
+
+def _weiche_module(pyfiles):
+    """Alle Namen, die im Projekt nur innerhalb eines try stehen."""
+    weich = set()
+    for p in pyfiles:
+        try:
+            baum = ast.parse(open(p, "r", encoding="utf-8",
+                                  errors="replace").read())
+        except Exception:
+            continue
+        weich |= _importe_im_try(baum)
+    return weich
 
 
 def _human(n):
@@ -1300,6 +1470,7 @@ def _inhalt_pruefen(dateien, log=None):
 # einfuehrung.mp3 zum Beispiel entsteht beim Bauen, nicht im Betrieb.
 EIGENE_DATEIEN = {
     "einfuehrung.txt", "einfuehrung.mp3", "einfuehrung_zeigen.py",
+    "splash.mp3",
     "starter.py", "anforderung.json", "installiert.txt",
     "app_icon.ico", "logo512.png", "logo64.png",
     "license", "license.txt", "notice.txt", "liesmich.md",
@@ -2555,7 +2726,7 @@ class KIPackager:
         m = lade_marke()
         self.autor_var = tk.StringVar(value=m.get("autor", ""))
         self.web_var = tk.StringVar(value=m.get("web", ""))
-        self.lizenz_var = tk.StringVar(value=m.get("lizenz", "GPL-3.0"))
+        self.lizenz_var = tk.StringVar(value=m.get("lizenz", "MIT"))
         self.kurz_var = tk.StringVar(value="Werkzeug der KI Stammtisch Cologne Community")
 
         wrap = tk.Frame(body, bg="#1a2332")
@@ -2946,7 +3117,7 @@ class KIPackager:
         marke = lade_marke()
         wrap = (WRAPPER_TPL.replace("~APPNAME~", name)
                 .replace("~AUTOR~", marke.get("autor", ""))
-                .replace("~LIZENZ~", marke.get("lizenz", "GPL-3.0"))
+                .replace("~LIZENZ~", marke.get("lizenz", "MIT"))
                 .replace("~WEB~", marke.get("web", "")))
         # Kein Nachladen mehr: die Pakete liegen im Ordner pakete,
         # starter.py haengt ihn vorn an den Suchpfad.
@@ -3158,8 +3329,26 @@ class KIPackager:
 
         pakete = []
         try:
-            gefunden = _scan_requirements(_alle_py_files(src_dir))
+            _py = _alle_py_files(src_dir)
+            gefunden = _scan_requirements(_py)
             pakete = list(gefunden)
+            # Welche Module das Programm selbst abfaengt - sie duerfen
+            # fehlen, ohne den Bau zu stoppen.
+            #
+            # OHNE pk-Vorsatz: _weiche_module steht in dieser Datei,
+            # nicht in packer_pakete. Am 02.09.2026 warf pk._weiche_module
+            # einen AttributeError, das except schluckte ihn still, und
+            # die Liste kam bei jedem Bau leer an.
+            try:
+                self._weiche_module = _weiche_module(_py)
+                self._log("Im Kode abgefangen: {} Modul(e)".format(
+                    len(self._weiche_module)))
+            except Exception as _f:
+                # Melden, nicht schlucken - Regel 568.
+                self._weiche_module = set()
+                self._log("Abgefangene Module nicht ermittelbar ("
+                          + type(_f).__name__ + ": " + str(_f)[:80]
+                          + ") - fehlende Module brechen den Bau ab.")
         except Exception as e:
             self._log("Paketsuche fehlgeschlagen: " + str(e))
 
@@ -3191,7 +3380,8 @@ class KIPackager:
             self._log("Keine Fremdpakete noetig.")
 
         angaben = pk.sammle(app_dir, pakete, log=self._log,
-                            quell_dir=src_dir)
+                            quell_dir=src_dir,
+                            weiche=getattr(self, "_weiche_module", set()))
         if angaben.get("fehlend"):
             self._log("ACHTUNG: nicht gefunden - "
                       + ", ".join(angaben["fehlend"]))
@@ -3201,7 +3391,44 @@ class KIPackager:
         # dem Projekt zusammengetragen - eigener Text, paket.json,
         # LIESMICH.md oder Docstring, in dieser Reihenfolge.
         try:
-            pe.schreibe(app_dir, name, src_dir, log=self._log)
+            # Der Projektordner des Nutzers. Im Einzeldatei-Modus
+            # enthaelt src_dir nur die eine kopierte Datei, die
+            # Beschreibung liegt daneben im Projektordner.
+            #
+            # Gelesen wird self.folder_var und nicht eine Variable
+            # folder: diese Methode ist _build_quelle und kennt keine
+            # solche - am 28.08.2026 gemessen, nachdem das Log
+            # name folder is not defined meldete.
+            # Zwei Felder, je nach Modus. Im Projekt-Modus steht der
+            # Ordner in folder_var; im Einzeldatei-Modus ist dieses
+            # Feld LEER und die Datei steht in script_var - der
+            # Ordner ist dann ihr Elternverzeichnis.
+            #
+            # Am 28.08.2026 gemessen: Nur folder_var zu lesen liess
+            # den Einzeldatei-Modus ohne Beschreibung zurueck.
+            _projekt = ""
+            try:
+                _projekt = self.folder_var.get().strip()
+            except Exception:
+                _projekt = ""
+            if not _projekt:
+                try:
+                    _skript = self.script_var.get().strip()
+                    if _skript and os.path.exists(_skript):
+                        _projekt = os.path.dirname(_skript)
+                except Exception:
+                    _projekt = ""
+            pe.schreibe(app_dir, name, src_dir, log=self._log,
+                        zweit_dir=_projekt or None)
+            # Der Splash spricht beim ersten Start, vor der
+            # Einfuehrung. Ohne diese Datei bleibt das Fenster
+            # stumm - fuer einen blinden Empfaenger heisst das,
+            # er weiss nicht, was dort steht.
+            try:
+                pe.schreibe_splash(app_dir, name, src_dir,
+                                   marke=self._marke(), log=self._log)
+            except Exception as _f:
+                self._log("splash.mp3 nicht erzeugt: " + str(_f)[:120])
             pe.schreibe_zeiger(app_dir, log=self._log)
         except Exception as fehler:
             self._log('Einfuehrung nicht erstellt: ' + str(fehler))

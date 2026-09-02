@@ -287,6 +287,114 @@ def mit_abhaengigkeiten(module, log=None):
     return fertig
 
 
+# --- pywin32 ---------------------------------------------------------
+# Kein normales Paket. Am 28.08.2026 gemessen: pythoncom.py und der
+# Ordner win32com lagen im Paket, luden aber nicht - es fehlte
+# pywintypes aus win32\lib und die DLL aus pywin32_system32.
+
+PYWIN32_MODULE = ("pythoncom", "pywintypes", "win32com", "win32api",
+                  "win32gui", "win32con", "win32file", "win32event",
+                  "win32clipboard", "win32process", "win32security",
+                  "win32service", "win32serviceutil", "win32print",
+                  "win32ui", "winerror", "servicemanager")
+
+PYWIN32_ORDNER = ("win32", "pywin32_system32", "win32comext",
+                  "pythonwin")
+
+
+def _pywin32_orte():
+    r"""Die Ordner, ohne die pywin32 beim Empfaenger nicht laedt.
+
+    win32 bringt win32\lib mit, dort liegt pywintypes.py.
+    pywin32_system32 haelt pywintypes313.dll und pythoncom313.dll -
+    ohne sie meldet jeder Import einen ImportError, obwohl der
+    Quelltext danebenliegt.
+    """
+    import importlib.util
+    orte = []
+    wurzel = ""
+    for probe in ("pythoncom", "win32com", "pywintypes"):
+        try:
+            spec = importlib.util.find_spec(probe)
+        except Exception:
+            spec = None
+        if spec is None:
+            continue
+        if spec.submodule_search_locations:
+            pfad = list(spec.submodule_search_locations)[0]
+            wurzel = os.path.dirname(pfad)
+        elif spec.origin:
+            wurzel = os.path.dirname(spec.origin)
+        # pywintypes liegt in win32\lib - zwei Ebenen hoeher.
+        if os.path.basename(wurzel).lower() == "lib":
+            wurzel = os.path.dirname(os.path.dirname(wurzel))
+        if wurzel and os.path.isdir(wurzel):
+            break
+    if not wurzel or not os.path.isdir(wurzel):
+        return orte
+    for name in PYWIN32_ORDNER:
+        pfad = os.path.join(wurzel, name)
+        if os.path.isdir(pfad):
+            orte.append(pfad)
+    return orte
+
+
+# --- Module, die allen Werkzeugen gehoeren ---------------------------
+# Nach Regel 651 liegen vorlesen.py, umlaute.py und Geschwister in
+# start\gemeinsam. Dieser Ordner steht in keinem Suchpfad, also
+# findet find_spec sie nicht.
+#
+# Am 01.09.2026 kostete das die halbe AI Terminal Bridge: vorlesen
+# wurde nicht gefunden, damit auch nicht dessen edge_tts, damit auch
+# nicht aiohttp, certifi und elf weitere.
+
+EIGENE_ORDNER = (
+    r"C:\Users\Entwickler\Desktop\start\gemeinsam",
+    r"C:\Users\Entwickler\Desktop\start\assistenz",
+    r"C:\Users\Entwickler\Desktop\start\sound",
+)
+
+
+def _eigenes_modul(modul):
+    """Sucht ein Modul in Roberts gemeinsamen Ordnern.
+
+    Zurueck kommt eine Liste mit dem Pfad oder eine leere Liste.
+    Gesucht wird NAME.py und der Ordner NAME mit __init__.py.
+    """
+    for ordner in EIGENE_ORDNER:
+        if not os.path.isdir(ordner):
+            continue
+        datei = os.path.join(ordner, modul + ".py")
+        if os.path.isfile(datei):
+            return [datei]
+        paket = os.path.join(ordner, modul)
+        if os.path.isfile(os.path.join(paket, "__init__.py")):
+            return [paket]
+    return []
+
+
+def _importe_von(pfad):
+    """Welche Fremdpakete ein einzelnes Modul selbst braucht.
+
+    Ohne diesen Schritt kaeme vorlesen.py mit, aber edge_tts nicht -
+    und das Programm stuerbe beim ersten Sprechen.
+    """
+    namen = set()
+    try:
+        with open(pfad, "r", encoding="utf-8", errors="replace") as f:
+            baum = ast.parse(f.read())
+    except Exception:
+        return namen
+    for knoten in ast.walk(baum):
+        if isinstance(knoten, ast.Import):
+            for a in knoten.names:
+                namen.add(a.name.split(".")[0])
+        elif isinstance(knoten, ast.ImportFrom):
+            if not knoten.level and knoten.module:
+                namen.add(knoten.module.split(".")[0])
+    return namen
+
+
 def _wo_liegt(modul):
     """
     Wo liegt ein Modul auf dieser Platte?
@@ -316,6 +424,20 @@ def _wo_liegt(modul):
         elif spec.origin and os.path.isfile(spec.origin):
             orte.append(spec.origin)
 
+    # pywin32 verteilt sich auf mehrere Ordner und wird von einer
+    # eigenen pth-Datei zusammengehalten. Keine Namensregel trifft
+    # das, deshalb benannt - wie ffmpeg in ERLAUBTE_PROGRAMME.
+    #
+    # pythoncom und win32com melden beide, es fehle pywintypes. Das
+    # liegt in win32\\lib, die zugehoerige DLL in pywin32_system32.
+    #
+    # Diese Zeilen muessen VOR dem return im Nachbarn-Block stehen -
+    # am 28.08.2026 standen sie dahinter und liefen nie.
+    if modul.lower() in PYWIN32_MODULE:
+        for _ort in _pywin32_orte():
+            if _ort not in orte:
+                orte.append(_ort)
+
     # Nachbarn und Angaben daneben.
     #
     # numpy legt seine uebersetzten Bibliotheken nicht in den eigenen
@@ -328,8 +450,13 @@ def _wo_liegt(modul):
     if orte:
         elternteil = os.path.dirname(orte[0])
         klein = modul.lower().replace("-", "_")
+        # _NAME.py neben NAME.py: sounddevice und soundfile halten
+        # ihren Kern dort. Am 28.08.2026 gemessen - ohne diese Zeile
+        # laedt sounddevice beim Empfaenger nicht, obwohl die Datei
+        # sounddevice.py im Paket liegt.
         nachbarn = (klein + ".libs", klein + ".dlls",
-                    "_" + klein + "_data", klein + "_libs")
+                    "_" + klein + "_data", klein + "_libs",
+                    "_" + klein, "_" + klein + ".py")
         try:
             for eintrag in os.listdir(elternteil):
                 e = eintrag.lower().replace("-", "_")
@@ -344,6 +471,12 @@ def _wo_liegt(modul):
         except Exception:
             pass
         return orte
+
+    # Roberts gemeinsame Module. Sie liegen ausserhalb aller
+    # site-packages und werden von find_spec nie gefunden.
+    eigen = _eigenes_modul(modul)
+    if eigen:
+        return eigen
 
     # Rueckfall: die alte Suche ueber site-packages, fuer Namen die sich
     # nicht einbinden lassen.
@@ -635,7 +768,7 @@ def _qt_ausduennen(ziel, quell_dir, log=None):
               "vollstaendig ({:.1f} MB).".format(vorher / 1_048_576))
 
 
-def sammle(app_dir, pakete, log=None, quell_dir=None):
+def sammle(app_dir, pakete, log=None, quell_dir=None, weiche=None):
     """
     Kopiert die genannten Pakete nach app_dir\\pakete und schreibt daneben
     anforderung.json. Gibt die Angaben als dict zurueck.
@@ -658,11 +791,38 @@ def sammle(app_dir, pakete, log=None, quell_dir=None):
         return angaben
 
     os.makedirs(ziel, exist_ok=True)
+    # Was ein eigenes Modul seinerseits braucht, gehoert dazu. Ohne
+    # diesen Durchgang kaeme vorlesen.py mit, edge_tts aber nicht.
+    nachgezogen = []
+    for paket in list(gebraucht):
+        for ort in _wo_liegt(paket):
+            if not ort.lower().endswith(".py"):
+                continue
+            if not any(ort.lower().startswith(o.lower())
+                       for o in EIGENE_ORDNER):
+                continue
+            for weiterer in sorted(_importe_von(ort)):
+                if weiterer in gebraucht or weiterer in nachgezogen:
+                    continue
+                if weiterer in sys.stdlib_module_names:
+                    continue
+                if not _wo_liegt(weiterer):
+                    continue
+                nachgezogen.append(weiterer)
+    if nachgezogen:
+        _log(log, "Aus eigenen Modulen nachgezogen: "
+             + ", ".join(nachgezogen))
+        gebraucht = list(gebraucht) + mit_abhaengigkeiten(nachgezogen, log)
+        gesehen = []
+        for name in gebraucht:
+            if name not in gesehen:
+                gesehen.append(name)
+        gebraucht = gesehen
+
     for paket in gebraucht:
         orte = _wo_liegt(paket)
         if not orte:
-            _log(log, "NICHT GEFUNDEN: " + paket
-                 + " - das Programm koennte beim Empfaenger scheitern.")
+            _log(log, "NICHT GEFUNDEN: " + paket)
             angaben["fehlend"].append(paket)
             continue
         for quelle in orte:
@@ -688,6 +848,47 @@ def sammle(app_dir, pakete, log=None, quell_dir=None):
         "uebersetzte Teile enthalten - an Python "
         + angaben["python"] + " gebunden" if angaben["binaer"]
         else "reines Python, versionsunabhaengig"))
+
+    # Ein Paket, dessen Kern fehlt, geht nicht hinaus. Bis zum
+    # 01.09.2026 wurde nur gemeldet und weitergebaut - die AI
+    # Terminal Bridge lag danach stumm auf der Webseite.
+    #
+    # Robert kann beim Empfaenger nicht nachsehen. Also bricht der
+    # Bau ab und nennt jedes fehlende Modul einzeln.
+    # Pflicht und Kuer trennen. Ein Import im try ist als
+    # verzichtbar gekennzeichnet - das Programm hat einen Rueckfall
+    # und laeuft ohne. Ein Import auf oberster Ebene ist Pflicht:
+    # fehlt er, stuerzt das Programm beim Start ab.
+    weich = set(weiche or ())
+    pflicht = [n for n in angaben["fehlend"] if n not in weich]
+    kuer = [n for n in angaben["fehlend"] if n in weich]
+
+    # Der Abbruch nennt seine Grundlage. Ohne diese Zeilen sagt er
+    # nur, WAS fehlt, nicht WORAUF er sich stuetzt - und die Suche
+    # nach der Ursache beginnt jedes Mal von vorn. Am 02.09.2026
+    # kostete das vier falsche Vermutungen.
+    if angaben["fehlend"]:
+        _log(log, "Als abgefangen bekannt: {} Modul(e){}".format(
+            len(weich),
+            " - " + ", ".join(sorted(weich)) if weich else " (KEINE)"))
+
+    if kuer:
+        _log(log, "Nicht gefunden, aber im Kode abgefangen - das "
+                  "Programm laeuft ohne sie:")
+        for name in kuer:
+            _log(log, "   " + name)
+
+    if pflicht:
+        _log(log, "ABBRUCH - diese Module werden beim Start gebraucht "
+                  "und fehlen dem Empfaenger:")
+        for name in pflicht:
+            _log(log, "   " + name)
+        _log(log, "Sie stehen nicht in einem try, das Programm faengt "
+                  "ihr Fehlen also nicht ab.")
+        _log(log, "Liegt ein Modul in einem eigenen Ordner, gehoert "
+                  "dieser in EIGENE_ORDNER in packer_pakete.py.")
+        raise RuntimeError(
+            "Nicht gefunden: " + ", ".join(pflicht))
 
     _schreibe_anforderung(app_dir, angaben)
     return angaben

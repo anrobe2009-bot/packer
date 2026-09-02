@@ -113,8 +113,14 @@ def _aus_docstring(pfad):
     return " ".join(treffer.group(1).split()) if treffer else ""
 
 
-def sammle_text(src_dir, name, log=None):
-    """Findet den besten verfuegbaren Einfuehrungstext."""
+def sammle_text(src_dir, name, log=None, zweit_dir=None):
+    """Findet den besten verfuegbaren Einfuehrungstext.
+
+    zweit_dir ist der Ordner, in dem nachgesehen wird, wenn in
+    src_dir nichts steht. Gebraucht wird das im Einzeldatei-Modus:
+    dort liegt im Bauordner nur die eine kopierte Datei, waehrend die
+    Beschreibung im Projektordner daneben liegt.
+    """
     eigen = os.path.join(src_dir, "einfuehrung.txt")
     if os.path.exists(eigen):
         text = _lies(eigen).strip()
@@ -148,6 +154,27 @@ def sammle_text(src_dir, name, log=None):
                 _log(log, "Einfuehrung: aus dem Docstring von " + datei + ".")
                 return _kuerzen(text)
 
+    # Nichts im Bauordner. Im Einzeldatei-Modus liegt die Beschreibung
+    # daneben, im Ordner der Quelldatei - dorthin wird genau einmal
+    # ausgewichen. Gemessen am 28.08.2026 an prompt_optimizer.
+    if zweit_dir and os.path.isdir(zweit_dir) \
+            and os.path.abspath(zweit_dir) != os.path.abspath(src_dir):
+        for datei in _beschreibungen(zweit_dir):
+            pfad = os.path.join(zweit_dir, datei)
+            if os.path.exists(pfad):
+                text = _aus_markdown(_lies(pfad))
+                if len(text) > 80:
+                    _log(log, "Einfuehrung: aus " + datei
+                              + " im Projektordner zusammengefasst.")
+                    return _kuerzen(text)
+        eigen2 = os.path.join(zweit_dir, "einfuehrung.txt")
+        if os.path.exists(eigen2):
+            text = _lies(eigen2).strip()
+            if text:
+                _log(log, "Einfuehrung: eigener Text aus dem "
+                          "Projektordner.")
+                return text
+
     _log(log, "Einfuehrung: kein Text gefunden.")
     return ""
 
@@ -178,16 +205,32 @@ def _beschreibungen(src_dir):
         vorhanden = os.listdir(src_dir)
     except Exception:
         return []
+    # Zwei Durchgaenge. Erst die exakten Treffer, dann die mit einem
+    # Vorsatz davor - so bleibt LIESMICH.md vor projekt_README.md.
+    #
+    # Ein Vorsatz zaehlt nur, wenn er mit _ oder - abgetrennt ist.
+    # Ohne diese Grenze faengt die Suche readme_generator.py und
+    # anleitung_bauen.txt ein, also Programmkode statt Beschreibung.
+    # Gemessen am 28.08.2026 an prompt_optimizer_README.md, die
+    # allein an der fehlenden Vorsatz-Regel durchfiel.
     treffer = []
-    for gesucht in BESCHREIBUNG_NAMEN:
-        for name in sorted(vorhanden):
-            wurzel, endung = os.path.splitext(name.lower())
-            if wurzel != gesucht:
-                continue
-            if endung not in BESCHREIBUNG_ENDUNGEN:
-                continue
-            if name not in treffer:
-                treffer.append(name)
+
+    def _passt(wurzel, gesucht, genau):
+        if genau:
+            return wurzel == gesucht
+        return (wurzel.endswith("_" + gesucht)
+                or wurzel.endswith("-" + gesucht))
+
+    for genau in (True, False):
+        for gesucht in BESCHREIBUNG_NAMEN:
+            for name in sorted(vorhanden):
+                wurzel, endung = os.path.splitext(name.lower())
+                if not _passt(wurzel, gesucht, genau):
+                    continue
+                if endung not in BESCHREIBUNG_ENDUNGEN:
+                    continue
+                if name not in treffer:
+                    treffer.append(name)
     return treffer
 
 
@@ -261,9 +304,133 @@ def sprich_datei(app_dir, text, src_dir, log=None):
     return pfad
 
 
-def schreibe(app_dir, name, src_dir, log=None):
+def sprich_text(pfad, text, stimme=None, log=None):
+    """Spricht einen beliebigen Text in eine MP3 an einen freien Ort.
+
+    Anders als sprich_datei ist der Zielpfad frei waehlbar. Gebraucht
+    wird das fuer die Vorstellung auf der Webseite: sie darf nicht im
+    Paket liegen, weil sie mit der Installation nichts zu tun hat.
+
+    Scheitert es, bleibt es ohne MP3. Kein Grund abzubrechen.
+    """
+    stimme = stimme or STANDARD_STIMME
+    try:
+        import asyncio
+        import edge_tts
+    except Exception as fehler:
+        _log(log, "edge-tts nicht verfuegbar - keine gesprochene "
+                  "Vorstellung: " + type(fehler).__name__)
+        return ""
+
+    sauber = " ".join(text.replace("-", " ").split())
+    if not sauber:
+        _log(log, "Kein Text fuer die Vorstellung.")
+        return ""
+
+    try:
+        verzeichnis = os.path.dirname(pfad)
+        if verzeichnis:
+            os.makedirs(verzeichnis, exist_ok=True)
+        asyncio.run(edge_tts.Communicate(sauber, stimme).save(pfad))
+    except Exception as e:
+        _log(log, "Vorstellung nicht erzeugt: " + str(e))
+        return ""
+
+    if not os.path.exists(pfad) or os.path.getsize(pfad) < 2000:
+        _log(log, "Vorstellung erzeugt, aber die Datei ist unbrauchbar.")
+        try:
+            os.remove(pfad)
+        except Exception:
+            pass
+        return ""
+
+    _log(log, "{} gesprochen von {}, {:.0f} KB."
+         .format(os.path.basename(pfad), stimme,
+                 os.path.getsize(pfad) / 1024))
+    return pfad
+
+
+def _ki_text(name, ordner, log=None):
+    """Laesst Gemini das Programm ansehen und beschreiben.
+
+    Zurueck kommt der Text oder eine leere Zeichenkette. Leer heisst:
+    kein Schluessel, kein Netz oder eine unbrauchbare Antwort - dann
+    greift die Dateisuche wie bisher. Ein Bau bricht nie daran ab.
+
+    Der Text wird zugleich als einfuehrung.txt im Projektordner
+    abgelegt. Damit hoert Robert bei zwei Bauten dasselbe, und der
+    Text laesst sich aendern.
+    """
+    if not ordner or not os.path.isdir(ordner):
+        return ""
+    try:
+        import packer_beschreibung as pb
+    except Exception as fehler:
+        _log(log, "KI-Beschreibung nicht verfuegbar: "
+                  + type(fehler).__name__)
+        return ""
+    try:
+        text = pb.erzeugen(name, ordner, log=log)
+    except Exception as fehler:
+        _log(log, "KI-Beschreibung fehlgeschlagen: " + str(fehler)[:120])
+        return ""
+    if text:
+        try:
+            pb.ablegen(ordner, text, log=log)
+        except Exception:
+            pass
+    return text
+
+
+def splash_text(name, marke=None):
+    """Der Satz, den der Splash beim ersten Start spricht.
+
+    Kurz, weil das Fenster nach zehn Sekunden von selbst weitergeht.
+    Er nennt, was auf dem Fenster steht: Werkzeug, Urheber, Lizenz,
+    Haftungsausschluss - und die Eingabetaste, damit ein blinder
+    Empfaenger weiss, dass er nicht warten muss.
+    """
+    marke = marke or {}
+    autor = str(marke.get("autor", "")).strip()
+    lizenz = str(marke.get("lizenz", "MIT")).strip() or "MIT"
+
+    teile = [name + "."]
+    if autor:
+        teile.append("Ein Werkzeug von " + autor + ".")
+    teile.append("Lizenz " + lizenz + ".")
+    teile.append("Dieses Programm wird ohne Gewährleistung "
+                 "bereitgestellt, die Nutzung erfolgt auf eigene "
+                 "Gefahr.")
+    teile.append("Mit der Eingabetaste geht es weiter, sonst nach "
+                 "zehn Sekunden von selbst.")
+    return " ".join(teile)
+
+
+def schreibe_splash(app_dir, name, src_dir, marke=None, log=None):
+    """Spricht splash.mp3 ins Paket.
+
+    Faellt es aus - kein edge-tts, keine Leitung -, bleibt das
+    Fenster still. Kein Grund abzubrechen: Es schliesst sich nach
+    zehn Sekunden ohnehin von selbst.
+    """
+    text = splash_text(name, marke)
+    pfad = os.path.join(app_dir, "splash.mp3")
+    stimme = _stimme_aus_paket(src_dir)
+    if sprich_text(pfad, text, stimme, log):
+        return pfad
+    _log(log, "Ohne splash.mp3 - das Fenster bleibt beim ersten Start "
+              "still und geht nach zehn Sekunden weiter.")
+    return ""
+
+
+def schreibe(app_dir, name, src_dir, log=None, zweit_dir=None):
     """Legt einfuehrung.txt ins Paket."""
-    text = sammle_text(src_dir, name, log)
+    # Zuerst die KI. Sie versteht, was das Programm tut; eine
+    # Textsuche findet nur, was jemand aufgeschrieben hat. Beim
+    # memory_hub kam so bis zum 29.08.2026 der Docstring heraus.
+    text = _ki_text(name, zweit_dir or src_dir, log)
+    if not text:
+        text = sammle_text(src_dir, name, log, zweit_dir)
     if not text:
         text = ("Zu diesem Programm liegt keine Beschreibung bei. "
                 "Naeheres steht in der Datei LIESMICH.md im Programmordner.")
